@@ -55,11 +55,25 @@ before_test: |
   fi
 
   echo "Launching curl helper pod..."
-  kubectl run curl-import -n $NAMESPACE --image=curlimages/curl:latest \
+  kubectl delete pod curl-import -n $NAMESPACE --ignore-not-found --wait=true
+  kubectl run curl-import -n $NAMESPACE --image=curlimages/curl:8.12.1 \
     --restart=Never --command -- sleep 600
 
   echo "Waiting for curl helper pod..."
-  kubectl wait --for=condition=ready pod/curl-import -n $NAMESPACE --timeout=120s
+  POD_READY=false
+  for i in $(seq 1 60); do
+    if kubectl wait --for=condition=ready pod/curl-import -n $NAMESPACE --timeout=5s 2>/dev/null; then
+      echo "curl-import pod is ready!"
+      POD_READY=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$POD_READY" = false ]; then
+    echo "curl-import pod failed to become ready"
+    kubectl get pods -n $NAMESPACE
+    exit 1
+  fi
 
   echo "Copying metrics data into curl helper pod..."
   kubectl cp metrics.json $NAMESPACE/curl-import:/tmp/metrics.json
@@ -83,14 +97,20 @@ before_test: |
     exit 1
   fi
 
-  HANDLER_COUNT=$(kubectl exec -n $NAMESPACE curl-import -- \
-    curl -sf 'http://victoriametrics:8428/api/v1/label/handler/values?start=1774994000&end=1775038000' \
-    | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']))" 2>/dev/null || echo "0")
+  HANDLER_VALUES=$(kubectl exec -n $NAMESPACE curl-import -- \
+    curl -sf 'http://victoriametrics:8428/api/v1/label/handler/values?start=1774994000&end=1775038000' || echo '{"data":[]}')
+  HANDLER_COUNT=$(printf '%s' "$HANDLER_VALUES" \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('data', [])))" 2>/dev/null || echo "0")
   echo "VictoriaMetrics has $HANDLER_COUNT handler label values"
   if [ "$HANDLER_COUNT" -lt 10 ]; then
     echo "Expected at least 10 handler values, got $HANDLER_COUNT"
     exit 1
   fi
+  if ! printf '%s' "$HANDLER_VALUES" | python3 -c "import sys,json; sys.exit(0 if 'read_rnd_next' in json.load(sys.stdin).get('data', []) else 1)"; then
+    echo "Expected handler label 'read_rnd_next' after import"
+    exit 1
+  fi
+  echo "Verified: read_rnd_next handler present"
 
   echo "Cleaning up curl helper pod..."
   kubectl delete pod curl-import -n $NAMESPACE --ignore-not-found || true

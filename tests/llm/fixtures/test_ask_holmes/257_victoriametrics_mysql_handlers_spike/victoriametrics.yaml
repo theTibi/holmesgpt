@@ -10,9 +10,22 @@ spec:
     metadata:
       labels: { app: victoriametrics }
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: victoriametrics
-        image: victoriametrics/victoria-metrics:latest
+        image: victoriametrics/victoria-metrics:v1.140.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
         args:
           - "-retentionPeriod=1y"
         ports:
