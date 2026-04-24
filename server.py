@@ -54,6 +54,7 @@ from holmes.utils.connection_utils import patch_socket_create_connection
 from holmes.utils.holmes_status import update_holmes_status_in_db
 from holmes.utils.holmes_sync_toolsets import holmes_sync_toolsets_status
 from holmes.utils.log import EndpointFilter
+from holmes.admin.admin_api import init_admin_app
 from holmes.checks.checks_api import init_checks_app
 from holmes.core.tools_utils.filesystem_result_storage import tool_result_storage
 from holmes.core.models import FrontendToolMode
@@ -272,8 +273,6 @@ if LOG_PERFORMANCE:
 
 
 init_checks_app(app, config)
-
-from holmes.admin.admin_api import init_admin_app
 init_admin_app(app, config, dal)
 
 

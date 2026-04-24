@@ -2,8 +2,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from holmes.admin.admin_api import init_admin_app
 from holmes.config import Config
 
 
@@ -83,15 +85,16 @@ class TestReloadToolsets:
 
 class TestReloadModels:
     def test_resets_model_registry(self, config):
-        with patch("holmes.config.LLMModelRegistry") as MockRegistry:
-            mock_instance = MagicMock()
-            mock_instance.models = {"gpt-4": MagicMock()}
-            MockRegistry.return_value = mock_instance
+        def make_registry(*_args, **_kwargs):
+            r = MagicMock()
+            r.models = {"gpt-4": MagicMock()}
+            return r
 
+        with patch("holmes.config.LLMModelRegistry", side_effect=make_registry):
             _ = config.llm_model_registry
-            assert config._llm_model_registry is not None
-
             old_registry = config._llm_model_registry
+            assert old_registry is not None
+
             config.reload_models()
 
             new_registry = config._llm_model_registry
@@ -109,8 +112,9 @@ class TestReloadModels:
 
 class TestAdminEndpoints:
     @pytest.fixture
-    def client(self):
-        from server import app
+    def client(self, config):
+        app = FastAPI()
+        init_admin_app(app, config, dal=MagicMock())
         return TestClient(app)
 
     @patch("holmes.config.Config.reload_toolsets")

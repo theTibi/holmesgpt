@@ -452,10 +452,17 @@ class Config(RobustaBaseConfig):
                 self.mcp_servers = fresh.mcp_servers
                 self.custom_toolsets = fresh.custom_toolsets
                 self.custom_runbook_catalogs = fresh.custom_runbook_catalogs
+                self.additional_toolsets = fresh.additional_toolsets
             self._toolset_manager = None
             self._cached_tool_executor = None
             self._cached_executor_key = None
-        logging.info("Toolset config reloaded from %s", self._config_file_path)
+        if fresh is None:
+            logging.warning(
+                "reload_toolsets called without a usable config file (%s); only caches cleared",
+                self._config_file_path,
+            )
+        else:
+            logging.info("Toolset config reloaded from %s", self._config_file_path)
         return {"reloaded": True}
 
     def reload_models(self) -> dict:

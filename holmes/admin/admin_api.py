@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from holmes.config import Config
 from holmes.core.supabase_dal import SupabaseDal
 from holmes.core.tools import PrerequisiteCacheMode, ToolsetTag
+from holmes.core.tools_utils.tool_executor import ToolExecutor
 
 admin_app = FastAPI()
 
@@ -21,7 +22,7 @@ class ReloadResponse(BaseModel):
     counts: Dict[str, int] = {}
 
 
-def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal):
+def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
     # TODO: Add authentication (API key header or similar) before exposing in production.
     global _CONFIG, _DAL
     _CONFIG = config
@@ -29,7 +30,7 @@ def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal):
     main_app.mount("/api/admin", admin_app)
 
 
-def _build_toolset_counts(executor) -> Dict[str, int]:
+def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
     toolsets = executor.toolsets
     total = len(toolsets)
     enabled = sum(1 for t in toolsets if t.enabled)
@@ -41,7 +42,7 @@ def _build_toolset_counts(executor) -> Dict[str, int]:
     return {"toolsets_total": total, "toolsets_enabled": enabled, "runbooks": runbook_count}
 
 
-def _reload_and_rebuild_toolsets():
+def _reload_and_rebuild_toolsets() -> ToolExecutor:
     _CONFIG.reload_toolsets()
     return _CONFIG.create_tool_executor(
         dal=_DAL,
@@ -53,7 +54,7 @@ def _reload_and_rebuild_toolsets():
 
 
 @admin_app.post("/reload/toolsets", response_model=ReloadResponse)
-def reload_toolsets():
+def reload_toolsets() -> ReloadResponse:
     try:
         executor = _reload_and_rebuild_toolsets()
         counts = _build_toolset_counts(executor)
@@ -65,11 +66,11 @@ def reload_toolsets():
         )
     except Exception as e:
         logging.error("Failed to reload toolsets", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @admin_app.post("/reload/models", response_model=ReloadResponse)
-def reload_models():
+def reload_models() -> ReloadResponse:
     try:
         result = _CONFIG.reload_models()
         model_count = result.get("models_loaded", 0)
@@ -81,11 +82,11 @@ def reload_models():
         )
     except Exception as e:
         logging.error("Failed to reload models", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @admin_app.post("/reload", response_model=ReloadResponse)
-def reload_all():
+def reload_all() -> ReloadResponse:
     try:
         executor = _reload_and_rebuild_toolsets()
         model_result = _CONFIG.reload_models()
@@ -100,4 +101,4 @@ def reload_all():
         )
     except Exception as e:
         logging.error("Failed to reload all config", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
