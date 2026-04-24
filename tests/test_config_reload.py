@@ -1,0 +1,179 @@
+from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
+from fastapi.testclient import TestClient
+
+from holmes.config import Config
+
+
+@pytest.fixture
+def config_yaml_path(tmp_path):
+    """Create a minimal config YAML and return its path."""
+    config_data = {
+        "toolsets": {
+            "prometheus/metrics": {
+                "enabled": True,
+                "config": {"prometheus_url": "http://localhost:9090"},
+            }
+        },
+    }
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump(config_data))
+    return config_file
+
+
+@pytest.fixture
+def config(config_yaml_path):
+    """Load a Config from the temp YAML."""
+    return Config.load_from_file(config_yaml_path)
+
+
+class TestReloadToolsets:
+    def test_resets_toolset_manager(self, config):
+        _ = config.toolset_manager
+        assert config._toolset_manager is not None
+
+        config.reload_toolsets()
+
+        assert config._toolset_manager is None
+
+    def test_resets_cached_executor(self, config):
+        config._cached_tool_executor = MagicMock()
+        config._cached_executor_key = ("fake",)
+
+        config.reload_toolsets()
+
+        assert config._cached_tool_executor is None
+        assert config._cached_executor_key is None
+
+    def test_picks_up_new_toolsets_from_yaml(self, config, config_yaml_path):
+        assert config.toolsets is not None
+        assert "prometheus/metrics" in config.toolsets
+
+        new_config_data = {
+            "toolsets": {
+                "prometheus/metrics": {
+                    "enabled": False,
+                },
+                "datadog/metrics": {
+                    "enabled": True,
+                    "config": {"api_key": "test"},
+                },
+            },
+        }
+        config_yaml_path.write_text(yaml.dump(new_config_data))
+
+        config.reload_toolsets()
+
+        assert "datadog/metrics" in config.toolsets
+        assert config.toolsets["prometheus/metrics"]["enabled"] is False
+
+    def test_returns_dict(self, config):
+        result = config.reload_toolsets()
+        assert isinstance(result, dict)
+        assert result["reloaded"] is True
+
+    def test_works_without_config_file(self):
+        config = Config()
+        result = config.reload_toolsets()
+        assert result["reloaded"] is True
+        assert config._toolset_manager is None
+
+
+class TestReloadModels:
+    def test_resets_model_registry(self, config):
+        with patch("holmes.config.LLMModelRegistry") as MockRegistry:
+            mock_instance = MagicMock()
+            mock_instance.models = {"gpt-4": MagicMock()}
+            MockRegistry.return_value = mock_instance
+
+            _ = config.llm_model_registry
+            assert config._llm_model_registry is not None
+
+            old_registry = config._llm_model_registry
+            config.reload_models()
+
+            new_registry = config._llm_model_registry
+            assert new_registry is not old_registry
+
+    def test_returns_model_count(self, config):
+        with patch("holmes.config.LLMModelRegistry") as MockRegistry:
+            mock_instance = MagicMock()
+            mock_instance.models = {"model-a": MagicMock(), "model-b": MagicMock()}
+            MockRegistry.return_value = mock_instance
+
+            result = config.reload_models()
+            assert result["models_loaded"] == 2
+
+
+class TestAdminEndpoints:
+    @pytest.fixture
+    def client(self):
+        from server import app
+        return TestClient(app)
+
+    @patch("holmes.config.Config.reload_toolsets")
+    @patch("holmes.config.Config.create_tool_executor")
+    def test_reload_toolsets_endpoint(self, mock_create, mock_reload, client):
+        mock_reload.return_value = {"reloaded": True}
+        mock_toolset = MagicMock()
+        mock_toolset.enabled = True
+        mock_toolset.name = "test"
+        mock_toolset.tools = []
+        mock_executor = MagicMock()
+        mock_executor.toolsets = [mock_toolset]
+        mock_create.return_value = mock_executor
+
+        response = client.post("/api/admin/reload/toolsets")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["component"] == "toolsets"
+        assert "counts" in data
+        assert "toolsets_total" in data["counts"]
+        mock_reload.assert_called_once()
+
+    @patch("holmes.config.Config.reload_models")
+    def test_reload_models_endpoint(self, mock_reload, client):
+        mock_reload.return_value = {"models_loaded": 3}
+
+        response = client.post("/api/admin/reload/models")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["component"] == "models"
+        assert data["counts"]["models_loaded"] == 3
+        mock_reload.assert_called_once()
+
+    @patch("holmes.config.Config.reload_models")
+    @patch("holmes.config.Config.reload_toolsets")
+    @patch("holmes.config.Config.create_tool_executor")
+    def test_reload_all_endpoint(self, mock_create, mock_reload_ts, mock_reload_models, client):
+        mock_reload_ts.return_value = {"reloaded": True}
+        mock_reload_models.return_value = {"models_loaded": 2}
+        mock_toolset = MagicMock()
+        mock_toolset.enabled = True
+        mock_toolset.name = "test"
+        mock_toolset.tools = []
+        mock_executor = MagicMock()
+        mock_executor.toolsets = [mock_toolset]
+        mock_create.return_value = mock_executor
+
+        response = client.post("/api/admin/reload")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["component"] == "all"
+        assert "toolsets_total" in data["counts"]
+        assert "models_loaded" in data["counts"]
+        mock_reload_ts.assert_called_once()
+        mock_reload_models.assert_called_once()
+
+    @patch("holmes.config.Config.reload_toolsets")
+    def test_reload_toolsets_error_returns_500(self, mock_reload, client):
+        mock_reload.side_effect = RuntimeError("config file missing")
+
+        response = client.post("/api/admin/reload/toolsets")
+        assert response.status_code == 500
+        assert "config file missing" in response.json()["detail"]

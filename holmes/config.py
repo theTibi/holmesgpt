@@ -159,9 +159,10 @@ class Config(RobustaBaseConfig):
 
     @property
     def llm_model_registry(self) -> LLMModelRegistry:
-        if not self._llm_model_registry:
-            self._llm_model_registry = LLMModelRegistry(self, dal=self.dal)
-        return self._llm_model_registry
+        with self._executor_lock:
+            if not self._llm_model_registry:
+                self._llm_model_registry = LLMModelRegistry(self, dal=self.dal)
+            return self._llm_model_registry
 
 
 
@@ -433,6 +434,42 @@ class Config(RobustaBaseConfig):
                 self._cached_executor_key = cache_key
 
         return [(name, old.value, new.value) for name, old, new in changes]
+
+    def reload_toolsets(self) -> dict:
+        """Re-read config YAML and rebuild toolsets from scratch.
+
+        Parses the config file into a temporary Config via Pydantic validation,
+        then copies toolset-related fields and resets lazy singletons so the next
+        request rebuilds everything from the fresh values.
+        """
+        fresh = None
+        if self._config_file_path and Path(self._config_file_path).exists():
+            fresh = load_model_from_file(Config, Path(self._config_file_path))
+
+        with self._executor_lock:
+            if fresh is not None:
+                self.toolsets = fresh.toolsets
+                self.mcp_servers = fresh.mcp_servers
+                self.custom_toolsets = fresh.custom_toolsets
+                self.custom_runbook_catalogs = fresh.custom_runbook_catalogs
+            self._toolset_manager = None
+            self._cached_tool_executor = None
+            self._cached_executor_key = None
+        logging.info("Toolset config reloaded from %s", self._config_file_path)
+        return {"reloaded": True}
+
+    def reload_models(self) -> dict:
+        """Re-read model_list.yaml and rebuild the model registry.
+
+        Resets the lazy registry so the next access re-reads the YAML and
+        constructs a fresh LLMModelRegistry.
+        """
+        with self._executor_lock:
+            self._llm_model_registry = None
+        registry = self.llm_model_registry
+        model_count = len(registry.models) if registry.models else 0
+        logging.info("Model registry reloaded: %d models", model_count)
+        return {"models_loaded": model_count}
 
     def create_toolcalling_llm(
         self,

@@ -273,6 +273,9 @@ if LOG_PERFORMANCE:
 
 init_checks_app(app, config)
 
+from holmes.admin.admin_api import init_admin_app
+init_admin_app(app, config, dal)
+
 
 def already_answered(conversation_history: Optional[List[dict]]) -> bool:
     if conversation_history is None:
