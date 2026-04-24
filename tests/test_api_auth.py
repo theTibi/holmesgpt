@@ -48,6 +48,8 @@ def _create_app(api_key: str = ""):
 
 
 class TestAuthDisabled:
+    """Verify that all endpoints are open when HOLMES_API_KEY is not set."""
+
     def setup_method(self):
         self.client = TestClient(_create_app(api_key=""))
 
@@ -65,6 +67,8 @@ class TestAuthDisabled:
 
 
 class TestAuthEnabled:
+    """Verify key enforcement, header variants, and health-check exemptions."""
+
     def setup_method(self):
         self.client = TestClient(_create_app(api_key=TEST_API_KEY))
 

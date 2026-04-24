@@ -259,6 +259,7 @@ if HOLMES_API_KEY:
 
     @app.middleware("http")
     async def api_key_auth(request: Request, call_next):
+        """Reject requests missing a valid API key (X-API-Key or Bearer token)."""
         if request.url.path in _AUTH_EXEMPT_PATHS:
             return await call_next(request)
 
