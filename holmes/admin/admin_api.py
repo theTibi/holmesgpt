@@ -23,6 +23,7 @@ class ReloadResponse(BaseModel):
 
 
 def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
+    """Register the admin sub-app on *main_app* under ``/api/admin``."""
     # TODO: Add authentication (API key header or similar) before exposing in production.
     global _CONFIG, _DAL
     _CONFIG = config
@@ -31,6 +32,7 @@ def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
 
 
 def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
+    """Return total, enabled, and runbook counts from a ToolExecutor."""
     toolsets = executor.toolsets
     total = len(toolsets)
     enabled = sum(1 for t in toolsets if t.enabled)
@@ -43,6 +45,7 @@ def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
 
 
 def _reload_and_rebuild_toolsets() -> ToolExecutor:
+    """Re-read the config file and rebuild the tool executor."""
     _CONFIG.reload_toolsets()
     return _CONFIG.create_tool_executor(
         dal=_DAL,
@@ -55,6 +58,7 @@ def _reload_and_rebuild_toolsets() -> ToolExecutor:
 
 @admin_app.post("/reload/toolsets", response_model=ReloadResponse)
 def reload_toolsets() -> ReloadResponse:
+    """Reload toolset configuration from disk."""
     try:
         executor = _reload_and_rebuild_toolsets()
         counts = _build_toolset_counts(executor)
@@ -71,6 +75,7 @@ def reload_toolsets() -> ReloadResponse:
 
 @admin_app.post("/reload/models", response_model=ReloadResponse)
 def reload_models() -> ReloadResponse:
+    """Reload the LLM model registry from disk."""
     try:
         result = _CONFIG.reload_models()
         model_count = result.get("models_loaded", 0)
@@ -87,6 +92,7 @@ def reload_models() -> ReloadResponse:
 
 @admin_app.post("/reload", response_model=ReloadResponse)
 def reload_all() -> ReloadResponse:
+    """Reload both toolsets and models in one call."""
     try:
         executor = _reload_and_rebuild_toolsets()
         model_result = _CONFIG.reload_models()

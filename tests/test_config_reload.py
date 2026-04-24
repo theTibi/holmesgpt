@@ -32,7 +32,10 @@ def config(config_yaml_path):
 
 
 class TestReloadToolsets:
+    """Unit tests for Config.reload_toolsets()."""
+
     def test_resets_toolset_manager(self, config):
+        """After reload, the cached toolset manager is cleared."""
         _ = config.toolset_manager
         assert config._toolset_manager is not None
 
@@ -41,6 +44,7 @@ class TestReloadToolsets:
         assert config._toolset_manager is None
 
     def test_resets_cached_executor(self, config):
+        """After reload, the cached tool executor and key are cleared."""
         config._cached_tool_executor = MagicMock()
         config._cached_executor_key = ("fake",)
 
@@ -50,6 +54,7 @@ class TestReloadToolsets:
         assert config._cached_executor_key is None
 
     def test_picks_up_new_toolsets_from_yaml(self, config, config_yaml_path):
+        """Rewriting the YAML and reloading picks up the new toolset entries."""
         assert config.toolsets is not None
         assert "prometheus/metrics" in config.toolsets
 
@@ -72,11 +77,13 @@ class TestReloadToolsets:
         assert config.toolsets["prometheus/metrics"]["enabled"] is False
 
     def test_returns_dict(self, config):
+        """reload_toolsets returns a dict with reloaded=True."""
         result = config.reload_toolsets()
         assert isinstance(result, dict)
         assert result["reloaded"] is True
 
     def test_works_without_config_file(self):
+        """Reload with no config file still clears caches without error."""
         config = Config()
         result = config.reload_toolsets()
         assert result["reloaded"] is True
@@ -84,7 +91,10 @@ class TestReloadToolsets:
 
 
 class TestReloadModels:
+    """Unit tests for Config.reload_models()."""
+
     def test_resets_model_registry(self, config):
+        """After reload, a fresh LLMModelRegistry instance is created."""
         def make_registry(*_args, **_kwargs):
             r = MagicMock()
             r.models = {"gpt-4": MagicMock()}
@@ -101,6 +111,7 @@ class TestReloadModels:
             assert new_registry is not old_registry
 
     def test_returns_model_count(self, config):
+        """reload_models returns the number of models loaded."""
         with patch("holmes.config.LLMModelRegistry") as MockRegistry:
             mock_instance = MagicMock()
             mock_instance.models = {"model-a": MagicMock(), "model-b": MagicMock()}
@@ -111,8 +122,11 @@ class TestReloadModels:
 
 
 class TestAdminEndpoints:
+    """Integration tests for the /api/admin reload endpoints."""
+
     @pytest.fixture
     def client(self, config):
+        """Lightweight FastAPI app with the admin sub-app mounted."""
         app = FastAPI()
         init_admin_app(app, config, dal=MagicMock())
         return TestClient(app)
@@ -120,6 +134,7 @@ class TestAdminEndpoints:
     @patch("holmes.config.Config.reload_toolsets")
     @patch("holmes.config.Config.create_tool_executor")
     def test_reload_toolsets_endpoint(self, mock_create, mock_reload, client):
+        """POST /reload/toolsets returns 200 with toolset counts."""
         mock_reload.return_value = {"reloaded": True}
         mock_toolset = MagicMock()
         mock_toolset.enabled = True
@@ -140,6 +155,7 @@ class TestAdminEndpoints:
 
     @patch("holmes.config.Config.reload_models")
     def test_reload_models_endpoint(self, mock_reload, client):
+        """POST /reload/models returns 200 with model count."""
         mock_reload.return_value = {"models_loaded": 3}
 
         response = client.post("/api/admin/reload/models")
@@ -154,6 +170,7 @@ class TestAdminEndpoints:
     @patch("holmes.config.Config.reload_toolsets")
     @patch("holmes.config.Config.create_tool_executor")
     def test_reload_all_endpoint(self, mock_create, mock_reload_ts, mock_reload_models, client):
+        """POST /reload returns 200 with both toolset and model counts."""
         mock_reload_ts.return_value = {"reloaded": True}
         mock_reload_models.return_value = {"models_loaded": 2}
         mock_toolset = MagicMock()
@@ -176,6 +193,7 @@ class TestAdminEndpoints:
 
     @patch("holmes.config.Config.reload_toolsets")
     def test_reload_toolsets_error_returns_500(self, mock_reload, client):
+        """When reload_toolsets raises, the endpoint returns HTTP 500."""
         mock_reload.side_effect = RuntimeError("config file missing")
 
         response = client.post("/api/admin/reload/toolsets")
