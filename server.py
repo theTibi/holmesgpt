@@ -21,7 +21,7 @@ import litellm
 import sentry_sdk
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from litellm.exceptions import AuthenticationError
 
 from holmes import get_version, is_official_release
@@ -250,6 +250,29 @@ if ENABLE_TELEMETRY and SENTRY_DSN:
         )
 
 app = FastAPI()
+
+HOLMES_API_KEY = os.environ.get("HOLMES_API_KEY", "")
+_AUTH_EXEMPT_PATHS = {"/healthz", "/readyz"}
+
+if HOLMES_API_KEY:
+    logging.info("API key authentication enabled (HOLMES_API_KEY is set)")
+
+    @app.middleware("http")
+    async def api_key_auth(request: Request, call_next):
+        if request.url.path in _AUTH_EXEMPT_PATHS:
+            return await call_next(request)
+
+        key = request.headers.get("X-API-Key") or request.headers.get(
+            "Authorization", ""
+        ).removeprefix("Bearer ").strip()
+
+        if key != HOLMES_API_KEY:
+            logging.warning("Unauthorized request: %s %s", request.method, request.url.path)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing API key"},
+            )
+        return await call_next(request)
 
 if LOG_PERFORMANCE:
 
