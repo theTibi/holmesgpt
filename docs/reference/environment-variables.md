@@ -70,7 +70,7 @@ Health check endpoints (`/healthz`, `/readyz`) are always exempt.
 
 **Generating a key:**
 ```bash
-# Generate a random 32-character key
+# Generate a random key with 32 bytes of entropy
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 # Or use openssl

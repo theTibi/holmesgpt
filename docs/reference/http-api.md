@@ -16,7 +16,7 @@ openssl rand -base64 32
 
 Then set it on the server:
 ```bash
-export HOLMES_API_KEY=<your-generated-key>
+export HOLMES_API_KEY="<your-generated-key>"
 ```
 
 **Include the API key in requests using either header:**
