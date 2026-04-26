@@ -96,7 +96,7 @@ class TestInfoFull:
         mock_config._config_file_path = "/app/config.yaml"
         mock_config.mcp_servers = {"my-server": {}}
 
-        with patch("holmes.core.llm.MODEL_LIST_FILE_LOCATION", "/app/model_list.yaml"):
+        with patch("server.MODEL_LIST_FILE_LOCATION", "/app/model_list.yaml"):
             response = client.get("/api/info?detail=full")
 
         assert response.status_code == 200
@@ -153,7 +153,7 @@ class TestInfoFull:
         mock_config._config_file_path = "/etc/holmes/config.yaml"
         mock_config.mcp_servers = None
 
-        with patch("holmes.core.llm.MODEL_LIST_FILE_LOCATION", "/app/model_list.yaml"):
+        with patch("server.MODEL_LIST_FILE_LOCATION", "/app/model_list.yaml"):
             data = client.get("/api/info?detail=full").json()
 
         assert data["config_path"] == "/etc/holmes/config.yaml"

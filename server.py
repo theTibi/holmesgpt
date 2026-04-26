@@ -44,6 +44,7 @@ from holmes.common.env_vars import (
     TOOLSET_STATUS_REFRESH_INTERVAL_SECONDS,
 )
 from holmes.config import DEFAULT_CONFIG_LOCATION, Config
+from holmes.core.llm import MODEL_LIST_FILE_LOCATION
 from holmes.core.conversations import (
     build_chat_messages,
 )
@@ -615,8 +616,6 @@ class InfoResponse(BaseModel):
 @app.get("/api/info", response_model=InfoResponse, response_model_exclude_none=True)
 def get_info(detail: Optional[str] = None) -> InfoResponse:
     """Return server info. Use ?detail=full for per-toolset breakdown."""
-    from holmes.core.llm import MODEL_LIST_FILE_LOCATION
-
     executor = config.create_tool_executor(
         dal=dal, reuse_executor=True, prerequisite_cache=PrerequisiteCacheMode.DISABLED,
     )
@@ -630,8 +629,7 @@ def get_info(detail: Optional[str] = None) -> InfoResponse:
     runbook_names: List[str] = []
     for t in all_toolsets:
         if t.name == "runbook" and t.tools:
-            raw_runbooks = getattr(t.tools[0], "available_runbooks", [])
-            runbook_names = [rb if isinstance(rb, str) else rb.name for rb in raw_runbooks]
+            runbook_names = list(getattr(t.tools[0], "available_runbooks", []) or [])
             break
 
     resp = InfoResponse(
