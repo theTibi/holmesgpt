@@ -2,8 +2,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from holmes.utils.auth import AUTH_EXEMPT_PATHS, extract_api_key
+
 TEST_API_KEY = "test-secret-key-12345"
-EXEMPT_PATHS = {"/healthz", "/readyz"}
 
 
 def _create_app(api_key: str = ""):
@@ -14,12 +15,10 @@ def _create_app(api_key: str = ""):
 
         @app.middleware("http")
         async def api_key_auth(request: Request, call_next):
-            if request.url.path in EXEMPT_PATHS:
+            if request.url.path in AUTH_EXEMPT_PATHS:
                 return await call_next(request)
 
-            key = request.headers.get("X-API-Key") or request.headers.get(
-                "Authorization", ""
-            ).removeprefix("Bearer ").strip()
+            key = extract_api_key(request)
 
             if key != api_key:
                 return JSONResponse(

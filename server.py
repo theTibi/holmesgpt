@@ -53,6 +53,7 @@ from holmes.core.scheduled_prompts import ScheduledPromptsExecutor
 from holmes.utils.connection_utils import patch_socket_create_connection
 from holmes.utils.holmes_status import update_holmes_status_in_db
 from holmes.utils.holmes_sync_toolsets import holmes_sync_toolsets_status
+from holmes.utils.auth import AUTH_EXEMPT_PATHS, extract_api_key
 from holmes.utils.log import EndpointFilter
 from holmes.checks.checks_api import init_checks_app
 from holmes.core.tools_utils.filesystem_result_storage import tool_result_storage
@@ -252,7 +253,6 @@ if ENABLE_TELEMETRY and SENTRY_DSN:
 app = FastAPI()
 
 HOLMES_API_KEY = os.environ.get("HOLMES_API_KEY", "")
-_AUTH_EXEMPT_PATHS = {"/healthz", "/readyz"}
 
 if HOLMES_API_KEY:
     logging.info("API key authentication enabled (HOLMES_API_KEY is set)")
@@ -260,12 +260,10 @@ if HOLMES_API_KEY:
     @app.middleware("http")
     async def api_key_auth(request: Request, call_next):
         """Reject requests missing a valid API key (X-API-Key or Bearer token)."""
-        if request.url.path in _AUTH_EXEMPT_PATHS:
+        if request.url.path in AUTH_EXEMPT_PATHS:
             return await call_next(request)
 
-        key = request.headers.get("X-API-Key") or request.headers.get(
-            "Authorization", ""
-        ).removeprefix("Bearer ").strip()
+        key = extract_api_key(request)
 
         if key != HOLMES_API_KEY:
             logging.warning("Unauthorized request: %s %s", request.method, request.url.path)
