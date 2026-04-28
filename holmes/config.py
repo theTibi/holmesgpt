@@ -466,16 +466,33 @@ class Config(RobustaBaseConfig):
         return {"reloaded": True}
 
     def reload_models(self) -> dict:
-        """Re-read model_list.yaml and rebuild the model registry.
+        """Re-read model_list.yaml and model-related config fields, then rebuild the registry.
 
-        Resets the lazy registry so the next access re-reads the YAML and
-        constructs a fresh LLMModelRegistry.
+        Re-parses the main config file to pick up changes to model, api_key,
+        api_base, api_version, and fast_model, then resets the lazy registry so
+        the next access constructs a fresh LLMModelRegistry with current values.
         """
+        fresh = None
+        if self._config_file_path and Path(self._config_file_path).exists():
+            fresh = load_model_from_file(Config, Path(self._config_file_path))
+
         with self._executor_lock:
+            if fresh is not None:
+                self.model = fresh.model
+                self.api_key = fresh.api_key
+                self.api_base = fresh.api_base
+                self.api_version = fresh.api_version
+                self.fast_model = fresh.fast_model
             self._llm_model_registry = None
         registry = self.llm_model_registry
         model_count = len(registry.models) if registry.models else 0
-        logging.info("Model registry reloaded: %d models", model_count)
+        if fresh is None:
+            logging.warning(
+                "reload_models called without a usable config file (%s); only registry cleared",
+                self._config_file_path,
+            )
+        else:
+            logging.info("Model config + registry reloaded: %d models", model_count)
         return {"models_loaded": model_count}
 
     def create_toolcalling_llm(
