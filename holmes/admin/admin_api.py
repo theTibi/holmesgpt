@@ -1,5 +1,5 @@
 import logging
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -11,8 +11,15 @@ from holmes.core.tools_utils.tool_executor import ToolExecutor
 
 admin_app = FastAPI()
 
-_CONFIG: Config
-_DAL: SupabaseDal
+_CONFIG: Optional[Config] = None
+_DAL: Optional[SupabaseDal] = None
+
+
+def _require_init() -> Tuple[Config, SupabaseDal]:
+    """Return (_CONFIG, _DAL) or raise 503 if init_admin_app hasn't run."""
+    if _CONFIG is None or _DAL is None:
+        raise HTTPException(status_code=503, detail="Admin app not initialized")
+    return _CONFIG, _DAL
 
 
 class ReloadResponse(BaseModel):
@@ -24,7 +31,6 @@ class ReloadResponse(BaseModel):
 
 def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
     """Register the admin sub-app on *main_app* under ``/api/admin``."""
-    # TODO: Add authentication (API key header or similar) before exposing in production.
     global _CONFIG, _DAL
     _CONFIG = config
     _DAL = dal
@@ -33,11 +39,10 @@ def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
 
 def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
     """Return total, enabled, and runbook counts from a ToolExecutor."""
-    toolsets = executor.toolsets
-    total = len(toolsets)
-    enabled = sum(1 for t in toolsets if t.enabled)
+    total = len(executor.toolsets)
+    enabled = len(executor.enabled_toolsets)
     runbook_count = 0
-    for t in toolsets:
+    for t in executor.enabled_toolsets:
         if t.name == "runbook" and t.tools:
             runbook_count = len(getattr(t.tools[0], "available_runbooks", []))
             break
@@ -46,8 +51,9 @@ def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
 
 def _reload_and_rebuild_toolsets() -> ToolExecutor:
     """Re-read the config file and rebuild the tool executor."""
-    _CONFIG.reload_toolsets()
-    return _CONFIG.create_tool_executor(
+    config, _ = _require_init()
+    config.reload_toolsets()
+    return config.create_tool_executor(
         dal=_DAL,
         toolset_tag_filter=[ToolsetTag.CORE, ToolsetTag.CLUSTER],
         enable_all_toolsets_possible=False,
@@ -77,7 +83,8 @@ def reload_toolsets() -> ReloadResponse:
 def reload_models() -> ReloadResponse:
     """Reload the LLM model registry from disk."""
     try:
-        result = _CONFIG.reload_models()
+        config, _ = _require_init()
+        result = config.reload_models()
         model_count = result.get("models_loaded", 0)
         return ReloadResponse(
             status="ok",
@@ -94,8 +101,9 @@ def reload_models() -> ReloadResponse:
 def reload_all() -> ReloadResponse:
     """Reload both toolsets and models in one call."""
     try:
+        config, _ = _require_init()
         executor = _reload_and_rebuild_toolsets()
-        model_result = _CONFIG.reload_models()
+        model_result = config.reload_models()
 
         counts = _build_toolset_counts(executor)
         counts["models_loaded"] = model_result.get("models_loaded", 0)

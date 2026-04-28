@@ -142,6 +142,7 @@ class TestAdminEndpoints:
         mock_toolset.tools = []
         mock_executor = MagicMock()
         mock_executor.toolsets = [mock_toolset]
+        mock_executor.enabled_toolsets = [mock_toolset]
         mock_create.return_value = mock_executor
 
         response = client.post("/api/admin/reload/toolsets")
@@ -179,6 +180,7 @@ class TestAdminEndpoints:
         mock_toolset.tools = []
         mock_executor = MagicMock()
         mock_executor.toolsets = [mock_toolset]
+        mock_executor.enabled_toolsets = [mock_toolset]
         mock_create.return_value = mock_executor
 
         response = client.post("/api/admin/reload")

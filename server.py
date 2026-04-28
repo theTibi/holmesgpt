@@ -273,7 +273,10 @@ if LOG_PERFORMANCE:
 
 
 init_checks_app(app, config)
-init_admin_app(app, config, dal)
+if os.environ.get("ENABLE_ADMIN_API", "false").lower() == "true":
+    init_admin_app(app, config, dal)
+else:
+    logging.info("Admin API is disabled (set ENABLE_ADMIN_API=true to enable)")
 
 
 def already_answered(conversation_history: Optional[List[dict]]) -> bool:
