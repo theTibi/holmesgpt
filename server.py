@@ -252,7 +252,7 @@ if ENABLE_TELEMETRY and SENTRY_DSN:
 
 app = FastAPI()
 
-HOLMES_API_KEY = os.environ.get("HOLMES_API_KEY", "")
+HOLMES_API_KEY = os.environ.get("HOLMES_API_KEY", "").strip()
 
 if HOLMES_API_KEY:
     logging.info("API key authentication enabled (HOLMES_API_KEY is set)")
