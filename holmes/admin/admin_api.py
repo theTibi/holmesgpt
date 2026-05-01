@@ -37,16 +37,13 @@ def init_admin_app(main_app: FastAPI, config: Config, dal: SupabaseDal) -> None:
     main_app.mount("/api/admin", admin_app)
 
 
-def _build_toolset_counts(executor: ToolExecutor) -> Dict[str, int]:
-    """Return total, enabled, and runbook counts from a ToolExecutor."""
+def _build_toolset_counts(config: Config, executor: ToolExecutor) -> Dict[str, int]:
+    """Return total and enabled toolset counts plus available skills from the skill catalog."""
     total = len(executor.toolsets)
     enabled = len(executor.enabled_toolsets)
-    runbook_count = 0
-    for t in executor.enabled_toolsets:
-        if t.name == "runbook" and t.tools:
-            runbook_count = len(getattr(t.tools[0], "available_runbooks", []))
-            break
-    return {"toolsets_total": total, "toolsets_enabled": enabled, "runbooks": runbook_count}
+    catalog = config.get_skill_catalog()
+    skills_count = len(catalog.list_available_skills()) if catalog else 0
+    return {"toolsets_total": total, "toolsets_enabled": enabled, "skills": skills_count}
 
 
 def _reload_and_rebuild_toolsets() -> ToolExecutor:
@@ -67,11 +64,12 @@ def reload_toolsets() -> ReloadResponse:
     """Reload toolset configuration from disk."""
     try:
         executor = _reload_and_rebuild_toolsets()
-        counts = _build_toolset_counts(executor)
+        config, _ = _require_init()
+        counts = _build_toolset_counts(config, executor)
         return ReloadResponse(
             status="ok",
             component="toolsets",
-            detail=f"{counts['toolsets_total']} toolsets loaded, {counts['toolsets_enabled']} enabled, {counts['runbooks']} runbooks",
+            detail=f"{counts['toolsets_total']} toolsets loaded, {counts['toolsets_enabled']} enabled, {counts['skills']} skills",
             counts=counts,
         )
     except Exception as e:
@@ -105,12 +103,15 @@ def reload_all() -> ReloadResponse:
         executor = _reload_and_rebuild_toolsets()
         model_result = config.reload_models()
 
-        counts = _build_toolset_counts(executor)
+        counts = _build_toolset_counts(config, executor)
         counts["models_loaded"] = model_result.get("models_loaded", 0)
         return ReloadResponse(
             status="ok",
             component="all",
-            detail=f"{counts['toolsets_total']} toolsets ({counts['toolsets_enabled']} enabled), {counts['models_loaded']} models",
+            detail=(
+                f"{counts['toolsets_total']} toolsets ({counts['toolsets_enabled']} enabled), "
+                f"{counts['skills']} skills, {counts['models_loaded']} models"
+            ),
             counts=counts,
         )
     except Exception as e:

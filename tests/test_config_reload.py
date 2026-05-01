@@ -76,6 +76,32 @@ class TestReloadToolsets:
         assert "datadog/metrics" in config.toolsets
         assert config.toolsets["prometheus/metrics"]["enabled"] is False
 
+    def test_picks_up_custom_skill_paths_from_yaml(self, config, config_yaml_path):
+        """Rewriting the YAML and reloading picks up custom_skill_paths."""
+        assert config.custom_skill_paths == []
+
+        skill_root = config_yaml_path.parent / "extra_skills"
+        skill_root.mkdir()
+        (skill_root / "SKILL.md").write_text(
+            "---\nname: my-test-skill\ndescription: test skill\n---\nBody.\n",
+            encoding="utf-8",
+        )
+
+        new_config_data = {
+            "toolsets": {
+                "prometheus/metrics": {
+                    "enabled": True,
+                    "config": {"prometheus_url": "http://localhost:9090"},
+                }
+            },
+            "custom_skill_paths": [str(skill_root)],
+        }
+        config_yaml_path.write_text(yaml.dump(new_config_data))
+
+        config.reload_toolsets()
+
+        assert config.custom_skill_paths == [str(skill_root)]
+
     def test_returns_dict(self, config):
         """reload_toolsets returns a dict with reloaded=True."""
         result = config.reload_toolsets()
@@ -131,10 +157,11 @@ class TestAdminEndpoints:
         init_admin_app(app, config, dal=MagicMock())
         return TestClient(app)
 
+    @patch("holmes.config.Config.get_skill_catalog", return_value=None)
     @patch("holmes.config.Config.reload_toolsets")
     @patch("holmes.config.Config.create_tool_executor")
-    def test_reload_toolsets_endpoint(self, mock_create, mock_reload, client):
-        """POST /reload/toolsets returns 200 with toolset counts."""
+    def test_reload_toolsets_endpoint(self, mock_create, mock_reload, _mock_catalog, client):
+        """POST /reload/toolsets returns 200 with toolset and skill counts."""
         mock_reload.return_value = {"reloaded": True}
         mock_toolset = MagicMock()
         mock_toolset.enabled = True
@@ -152,6 +179,8 @@ class TestAdminEndpoints:
         assert data["component"] == "toolsets"
         assert "counts" in data
         assert "toolsets_total" in data["counts"]
+        assert "skills" in data["counts"]
+        assert data["counts"]["skills"] == 0
         mock_reload.assert_called_once()
 
     @patch("holmes.config.Config.reload_models")
@@ -167,11 +196,14 @@ class TestAdminEndpoints:
         assert data["counts"]["models_loaded"] == 3
         mock_reload.assert_called_once()
 
+    @patch("holmes.config.Config.get_skill_catalog", return_value=None)
     @patch("holmes.config.Config.reload_models")
     @patch("holmes.config.Config.reload_toolsets")
     @patch("holmes.config.Config.create_tool_executor")
-    def test_reload_all_endpoint(self, mock_create, mock_reload_ts, mock_reload_models, client):
-        """POST /reload returns 200 with both toolset and model counts."""
+    def test_reload_all_endpoint(
+        self, mock_create, mock_reload_ts, mock_reload_models, _mock_catalog, client
+    ):
+        """POST /reload returns 200 with toolset, skill, and model counts."""
         mock_reload_ts.return_value = {"reloaded": True}
         mock_reload_models.return_value = {"models_loaded": 2}
         mock_toolset = MagicMock()
@@ -189,6 +221,8 @@ class TestAdminEndpoints:
         assert data["status"] == "ok"
         assert data["component"] == "all"
         assert "toolsets_total" in data["counts"]
+        assert "skills" in data["counts"]
+        assert data["counts"]["skills"] == 0
         assert "models_loaded" in data["counts"]
         mock_reload_ts.assert_called_once()
         mock_reload_models.assert_called_once()

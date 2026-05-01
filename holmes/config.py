@@ -456,8 +456,9 @@ class Config(RobustaBaseConfig):
         """Re-read config YAML and rebuild toolsets from scratch.
 
         Parses the config file into a temporary Config via Pydantic validation,
-        then copies toolset-related fields and resets lazy singletons so the next
-        request rebuilds everything from the fresh values.
+        then copies toolset-related fields (toolsets, MCP servers, custom toolsets,
+        additional toolsets, custom skill paths) and resets lazy singletons so the
+        next request rebuilds everything from the fresh values.
         """
         fresh = None
         if self._config_file_path and Path(self._config_file_path).exists():
@@ -468,7 +469,7 @@ class Config(RobustaBaseConfig):
                 self.toolsets = fresh.toolsets
                 self.mcp_servers = fresh.mcp_servers
                 self.custom_toolsets = fresh.custom_toolsets
-                self.custom_runbook_catalogs = fresh.custom_runbook_catalogs
+                self.custom_skill_paths = fresh.custom_skill_paths
                 self.additional_toolsets = fresh.additional_toolsets
             self._toolset_manager = None
             self._cached_tool_executor = None

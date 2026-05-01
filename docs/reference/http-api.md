@@ -618,7 +618,7 @@ curl http://<HOLMES-URL>/api/model
 ---
 
 ### `/api/admin/reload` (POST)
-**Description:** Reload all configuration (toolsets and models) from disk without restarting the server.
+**Description:** Reload all configuration (toolsets, skill discovery paths, and models) from disk without restarting the server.
 
 **Example**
 ```bash
@@ -630,11 +630,11 @@ curl -X POST http://<HOLMES-URL>/api/admin/reload
 {
   "status": "ok",
   "component": "all",
-  "detail": "50 toolsets (15 enabled), 4 models",
+  "detail": "50 toolsets (15 enabled), 12 skills, 4 models",
   "counts": {
     "toolsets_total": 50,
     "toolsets_enabled": 15,
-    "runbooks": 3,
+    "skills": 12,
     "models_loaded": 4
   }
 }
@@ -643,7 +643,7 @@ curl -X POST http://<HOLMES-URL>/api/admin/reload
 ---
 
 ### `/api/admin/reload/toolsets` (POST)
-**Description:** Re-read the config YAML and rebuild all toolsets, runbooks, and MCP servers. Use this after modifying the Holmes config file.
+**Description:** Re-read the config YAML and rebuild toolsets, MCP servers, and **`custom_skill_paths`** (local skill directories / `SKILL.md` discovery). Use this after modifying the Holmes config file.
 
 **Example**
 ```bash
@@ -655,11 +655,11 @@ curl -X POST http://<HOLMES-URL>/api/admin/reload/toolsets
 {
   "status": "ok",
   "component": "toolsets",
-  "detail": "50 toolsets loaded, 15 enabled, 3 runbooks",
+  "detail": "50 toolsets loaded, 15 enabled, 12 skills",
   "counts": {
     "toolsets_total": 50,
     "toolsets_enabled": 15,
-    "runbooks": 3
+    "skills": 12
   }
 }
 ```
