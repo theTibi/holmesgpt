@@ -28,6 +28,7 @@ from holmes.common.env_vars import (
     AZURE_AD_TOKEN_AUTH,
     EXTRA_HEADERS,
     FALLBACK_CONTEXT_WINDOW_SIZE,
+    LLM_EXTRA_STRIP_MESSAGE_FIELDS,
     LLM_REQUEST_TIMEOUT,
     LOAD_ALL_ROBUSTA_MODELS,
     REASONING_EFFORT,
@@ -347,6 +348,11 @@ class DefaultLLM(LLM):
                     model_requirements = litellm.validate_environment(
                         model=model, api_key=api_key, api_base=api_base
                     )
+        elif provider == "github_copilot":
+            # GitHub Copilot uses OAuth device flow for authentication, not
+            # traditional API keys.  LiteLLM handles the token lifecycle
+            # internally, so skip the standard key validation.
+            model_requirements = {"keys_in_environment": True, "missing_keys": []}
         elif provider == "azure":
             model_requirements = litellm.validate_environment(
                 model=model, api_key=api_key, api_base=api_base, api_version=api_version
@@ -568,7 +574,9 @@ class DefaultLLM(LLM):
         # Strip internal fields (e.g. token_count cache) so provider APIs only
         # receive valid message schema fields.  Shallow-copy only when needed to
         # avoid mutating the caller's dicts (which would invalidate the cache).
-        _INTERNAL_FIELDS = {"token_count"}
+        # Extra fields can be added via LLM_EXTRA_STRIP_MESSAGE_FIELDS env var
+        # (e.g. "provider_specific_fields") when a provider rejects them.
+        _INTERNAL_FIELDS = {"token_count"} | LLM_EXTRA_STRIP_MESSAGE_FIELDS
         sanitized_messages: List[Dict[str, Any]] = [
             {k: v for k, v in m.items() if k not in _INTERNAL_FIELDS}
             if m.keys() & _INTERNAL_FIELDS
@@ -663,7 +671,17 @@ class LLMModelRegistry:
         return self._default_robusta_model
 
     def _init_models(self):
-        self._llms = self._parse_models_file(MODEL_LIST_FILE_LOCATION)
+        # Precedence for the model list file:
+        # 1. MODEL_LIST_FILE_LOCATION (env var, or its server default when the
+        #    file exists -- covers Helm deployments mounting /etc/holmes/...)
+        # 2. ~/.holmes/model_list.yaml (CLI default)
+        from holmes.core.config import config_path_dir
+
+        if os.path.exists(MODEL_LIST_FILE_LOCATION):
+            path = MODEL_LIST_FILE_LOCATION
+        else:
+            path = os.path.join(config_path_dir, "model_list.yaml")
+        self._llms = self._parse_models_file(path)
 
         if self._should_load_robusta_ai():
             self.configure_robusta_ai_model()
