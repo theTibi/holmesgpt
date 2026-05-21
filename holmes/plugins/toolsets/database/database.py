@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 import os
@@ -7,10 +6,9 @@ from abc import ABC
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urlparse
 
+import requests
 from pydantic import ConfigDict, Field, model_validator
 
 from holmes.core.tools import (
@@ -111,83 +109,109 @@ def _detect_subtype(connection_url: str) -> DatabaseSubtype:
     return info.subtype if info else DatabaseSubtype.UNKNOWN
 
 
-def _should_use_clickhouse_http_json(config: "DatabaseConfig") -> bool:
-    """True when config enables the HTTP JSONEachRow query path (validated at load time)."""
-    return config.clickhouse_use_http_json
+def _parse_clickhouse_http_url(
+    url: str,
+) -> Tuple[str, str, Optional[Tuple[str, str]]]:
+    """Parse a clickhouse+http(s)://... URL into (base_url, database, auth).
 
-
-def _parse_clickhouse_http_url(url: str) -> Tuple[str, str, Optional[str]]:
-    """Parse clickhouse+http(s) URL into (base_url, database, auth_header)."""
+    Uses ``urllib.parse`` attributes so percent-encoded credentials, IPv6 hosts,
+    and user-with-empty-password (e.g. the ClickHouse ``default`` user) are all
+    handled correctly. ``database`` is percent-encoded for safe interpolation.
+    """
     parsed = urlparse(url)
-    scheme = parsed.scheme or ""
-    netloc = parsed.netloc or ""
-    path = (parsed.path or "").strip("/") or "default"
-    database = path
-    if "@" in netloc:
-        userinfo, hostport = netloc.rsplit("@", 1)
-        user, _, password = userinfo.partition(":")
-        auth_header: Optional[str] = None
-        if user and password:
-            auth_header = (
-                "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
-            )
-    else:
-        hostport = netloc
-        auth_header = None
-    if ":" in hostport:
-        host, _, port = hostport.rpartition(":")
-    else:
-        host, port = hostport, "8123"
+    scheme = (parsed.scheme or "").lower()
     protocol = "https" if "https" in scheme else "http"
-    base_url = f"{protocol}://{host}:{port}"
-    return base_url, database, auth_header
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (8443 if protocol == "https" else 8123)
+    host_repr = f"[{host}]" if ":" in host else host  # IPv6 literal
+    base_url = f"{protocol}://{host_repr}:{port}"
+
+    database = quote((parsed.path or "").strip("/") or "default", safe="")
+
+    auth: Optional[Tuple[str, str]] = None
+    if parsed.username is not None:
+        # urllib does not percent-decode userinfo automatically.
+        auth = (unquote(parsed.username), unquote(parsed.password or ""))
+
+    return base_url, database, auth
 
 
 def _execute_clickhouse_http(
     base_url: str,
     database: str,
-    auth_header: Optional[str],
+    auth: Optional[Tuple[str, str]],
     sql: str,
     effective_limit: int,
     timeout_seconds: int = 60,
+    verify_ssl: bool = True,
 ) -> Dict[str, Any]:
-    """Execute a read-only ClickHouse query via HTTP API with JSONEachRow."""
-    query_url = f"{base_url}/?database={database}&default_format=JSONEachRow"
-    req = Request(query_url, data=sql.encode("utf-8"), method="POST")
-    req.add_header("Content-Type", "text/plain; charset=utf-8")
-    if auth_header:
-        req.add_header("Authorization", auth_header)
+    """Execute a read-only ClickHouse query over HTTP, parsing JSONEachRow.
+
+    The response is streamed line-by-line; iteration stops after
+    ``effective_limit`` rows so very large result sets are not buffered in memory.
+    """
+    params = {"database": database, "default_format": "JSONEachRow"}
+    session = requests.Session()
+    # Avoid silently picking up credentials from ~/.netrc when auth is None;
+    # toolset config is the single source of truth for credentials.
+    session.trust_env = False
     try:
-        with urlopen(req, timeout=timeout_seconds) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        raise ValueError(f"ClickHouse HTTP error {e.code}: {err_body or e.reason}")
-    except URLError as e:
-        raise ValueError(f"ClickHouse connection error: {e.reason}")
-    lines = [line.strip() for line in body.strip().split("\n") if line.strip()]
-    columns: List[str] = []
-    rows: List[List[Any]] = []
-    for i, line in enumerate(lines):
-        if i >= effective_limit:
-            return {
-                "columns": columns,
-                "rows": rows,
-                "row_count": len(rows),
-                "truncated": True,
-            }
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not columns:
-            columns = list(obj.keys())
-        rows.append([obj.get(k) for k in columns])
+        response = session.post(
+            base_url,
+            params=params,
+            data=sql.encode("utf-8"),
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            auth=auth,
+            verify=verify_ssl,
+            timeout=timeout_seconds,
+            stream=True,
+        )
+    except requests.exceptions.RequestException as e:
+        raise ValueError(
+            f"ClickHouse connection error on {base_url} (db={database}): {e}. "
+            f"SQL: {sql[:500]}"
+        ) from e
+
+    with response:
+        if response.status_code != 200:
+            err_body = (response.text or "")[:2000]
+            raise ValueError(
+                f"ClickHouse HTTP error {response.status_code} on {base_url} "
+                f"(db={database}): {err_body or response.reason}. "
+                f"SQL: {sql[:500]}"
+            )
+
+        columns: List[str] = []
+        rows: List[List[Any]] = []
+        truncated = False
+        kept = 0
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if kept >= effective_limit:
+                truncated = True
+                break
+            try:
+                obj = json.loads(raw_line)
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "ClickHouse JSONEachRow decode error on %s (db=%s): %s. Line: %s",
+                    base_url,
+                    database,
+                    e,
+                    raw_line[:200],
+                )
+                continue
+            if not columns:
+                columns = list(obj.keys())
+            rows.append([obj.get(k) for k in columns])
+            kept += 1
+
     return {
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),
-        "truncated": False,
+        "truncated": truncated,
     }
 
 
@@ -376,17 +400,18 @@ class DatabaseToolset(Toolset):
 
     def _perform_health_check(self) -> Tuple[bool, str]:
         try:
-            if _should_use_clickhouse_http_json(self.database_config):
-                base_url, database, auth_header = _parse_clickhouse_http_url(
+            if self.database_config.clickhouse_use_http_json:
+                base_url, database, auth = _parse_clickhouse_http_url(
                     self.database_config.connection_url
                 )
                 _execute_clickhouse_http(
                     base_url,
                     database,
-                    auth_header,
+                    auth,
                     "SELECT 1",
                     effective_limit=1,
                     timeout_seconds=self.database_config.timeout_seconds,
+                    verify_ssl=self.database_config.verify_ssl,
                 )
                 self._dialect = "clickhouse"
                 self._update_tool_descriptions()
@@ -470,21 +495,22 @@ class DatabaseToolset(Toolset):
             limit or self.database_config.max_rows, self.database_config.max_rows
         )
 
-        if _should_use_clickhouse_http_json(self.database_config):
+        if self.database_config.clickhouse_use_http_json:
             logger.debug(
                 "ClickHouse HTTP JSONEachRow query: %s",
                 sql[:80],
             )
-            base_url, database, auth_header = _parse_clickhouse_http_url(
+            base_url, database, auth = _parse_clickhouse_http_url(
                 self.database_config.connection_url
             )
             return _execute_clickhouse_http(
                 base_url,
                 database,
-                auth_header,
+                auth,
                 sql,
                 effective_limit,
                 timeout_seconds=self.database_config.timeout_seconds,
+                verify_ssl=self.database_config.verify_ssl,
             )
 
         url = _normalise_url(self.database_config.connection_url)
