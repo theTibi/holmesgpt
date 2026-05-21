@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 import os
 import re
@@ -5,9 +7,11 @@ from abc import ABC
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from holmes.core.tools import (
     CallablePrerequisite,
@@ -107,6 +111,86 @@ def _detect_subtype(connection_url: str) -> DatabaseSubtype:
     return info.subtype if info else DatabaseSubtype.UNKNOWN
 
 
+def _should_use_clickhouse_http_json(config: "DatabaseConfig") -> bool:
+    """True when config enables the HTTP JSONEachRow query path (validated at load time)."""
+    return config.clickhouse_use_http_json
+
+
+def _parse_clickhouse_http_url(url: str) -> Tuple[str, str, Optional[str]]:
+    """Parse clickhouse+http(s) URL into (base_url, database, auth_header)."""
+    parsed = urlparse(url)
+    scheme = parsed.scheme or ""
+    netloc = parsed.netloc or ""
+    path = (parsed.path or "").strip("/") or "default"
+    database = path
+    if "@" in netloc:
+        userinfo, hostport = netloc.rsplit("@", 1)
+        user, _, password = userinfo.partition(":")
+        auth_header: Optional[str] = None
+        if user and password:
+            auth_header = (
+                "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+            )
+    else:
+        hostport = netloc
+        auth_header = None
+    if ":" in hostport:
+        host, _, port = hostport.rpartition(":")
+    else:
+        host, port = hostport, "8123"
+    protocol = "https" if "https" in scheme else "http"
+    base_url = f"{protocol}://{host}:{port}"
+    return base_url, database, auth_header
+
+
+def _execute_clickhouse_http(
+    base_url: str,
+    database: str,
+    auth_header: Optional[str],
+    sql: str,
+    effective_limit: int,
+    timeout_seconds: int = 60,
+) -> Dict[str, Any]:
+    """Execute a read-only ClickHouse query via HTTP API with JSONEachRow."""
+    query_url = f"{base_url}/?database={database}&default_format=JSONEachRow"
+    req = Request(query_url, data=sql.encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "text/plain; charset=utf-8")
+    if auth_header:
+        req.add_header("Authorization", auth_header)
+    try:
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raise ValueError(f"ClickHouse HTTP error {e.code}: {err_body or e.reason}")
+    except URLError as e:
+        raise ValueError(f"ClickHouse connection error: {e.reason}")
+    lines = [line.strip() for line in body.strip().split("\n") if line.strip()]
+    columns: List[str] = []
+    rows: List[List[Any]] = []
+    for i, line in enumerate(lines):
+        if i >= effective_limit:
+            return {
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": True,
+            }
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not columns:
+            columns = list(obj.keys())
+        rows.append([obj.get(k) for k in columns])
+    return {
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+    }
+
+
 class DatabaseConfig(ToolsetConfig):
     """Configuration for the SQL database toolset.
 
@@ -167,6 +251,48 @@ class DatabaseConfig(ToolsetConfig):
         ge=1,
         le=10000,
     )
+
+    clickhouse_use_http_json: bool = Field(
+        default=False,
+        title="ClickHouse HTTP JSONEachRow",
+        description=(
+            "When True and connection_url is ClickHouse, execute read queries via the "
+            "ClickHouse HTTP API with default_format=JSONEachRow instead of the "
+            "SQLAlchemy clickhouse-sqlalchemy driver (TabSeparatedWithNamesAndTypes). "
+            "Use when result sets include DateTime64 with precision beyond microseconds "
+            "(e.g. OpenTelemetry logs), which can fail driver TSV parsing with "
+            "'unconverted data remains'. Default: False."
+        ),
+    )
+
+    timeout_seconds: int = Field(
+        default=60,
+        title="Query Timeout",
+        description=(
+            "Timeout in seconds for ClickHouse HTTP JSONEachRow queries when "
+            "clickhouse_use_http_json is enabled. Not applied to the SQLAlchemy driver path."
+        ),
+        ge=1,
+        le=600,
+    )
+
+    @model_validator(mode="after")
+    def _validate_clickhouse_http_json(self) -> "DatabaseConfig":
+        if not self.clickhouse_use_http_json:
+            return self
+        if "clickhouse" not in self.connection_url.lower():
+            raise ValueError(
+                "clickhouse_use_http_json requires a ClickHouse connection_url"
+            )
+        scheme = urlparse(self.connection_url).scheme.lower()
+        if "native" in scheme and "http" not in scheme:
+            logger.warning(
+                "clickhouse_use_http_json uses the ClickHouse HTTP API (port 8123); "
+                "connection_url appears to use the native protocol (%s). "
+                "Prefer clickhouse+http:// for this option.",
+                scheme,
+            )
+        return self
 
 
 class DatabaseToolset(Toolset):
@@ -250,6 +376,21 @@ class DatabaseToolset(Toolset):
 
     def _perform_health_check(self) -> Tuple[bool, str]:
         try:
+            if _should_use_clickhouse_http_json(self.database_config):
+                base_url, database, auth_header = _parse_clickhouse_http_url(
+                    self.database_config.connection_url
+                )
+                _execute_clickhouse_http(
+                    base_url,
+                    database,
+                    auth_header,
+                    "SELECT 1",
+                    effective_limit=1,
+                    timeout_seconds=self.database_config.timeout_seconds,
+                )
+                self._dialect = "clickhouse"
+                self._update_tool_descriptions()
+                return True, "Connected to ClickHouse (HTTP JSONEachRow)"
             url = _normalise_url(self.database_config.connection_url)
             engine = self._create_engine(url)
             with engine.connect() as conn:
@@ -328,6 +469,24 @@ class DatabaseToolset(Toolset):
         effective_limit = min(
             limit or self.database_config.max_rows, self.database_config.max_rows
         )
+
+        if _should_use_clickhouse_http_json(self.database_config):
+            logger.debug(
+                "ClickHouse HTTP JSONEachRow query: %s",
+                sql[:80],
+            )
+            base_url, database, auth_header = _parse_clickhouse_http_url(
+                self.database_config.connection_url
+            )
+            return _execute_clickhouse_http(
+                base_url,
+                database,
+                auth_header,
+                sql,
+                effective_limit,
+                timeout_seconds=self.database_config.timeout_seconds,
+            )
+
         url = _normalise_url(self.database_config.connection_url)
         engine = self._create_engine(url)
         try:
