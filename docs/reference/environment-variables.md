@@ -180,6 +180,24 @@ export MODEL_LIST_FILE_LOCATION="/path/to/model_list.yaml"
 
 See [Using Multiple Providers](../ai-providers/using-multiple-providers.md) for the model list file format and usage.
 
+### LITELLM_MODEL_COST_MAP_URL
+Overrides the URL LiteLLM fetches the model catalog (`model_prices_and_context_window.json`) from. LiteLLM uses that catalog to know each model's context window, max output tokens, and pricing. By default LiteLLM pulls it from `raw.githubusercontent.com`, which is unreachable from networks that block GitHub egress.
+
+Robusta hosts a mirror of the same file at:
+
+```
+https://api.robusta.dev/litellm/model_prices_and_context_window.json
+```
+
+The mirror is cached and falls back to its last-known-good copy if the upstream is temporarily unreachable, so pointing at it gives the same freshness as the default URL without requiring egress to `raw.githubusercontent.com`.
+
+**Helm example:**
+```yaml
+additionalEnvVars:
+  - name: LITELLM_MODEL_COST_MAP_URL
+    value: https://api.robusta.dev/litellm/model_prices_and_context_window.json
+```
+
 ### HOLMES_CONFIG_PATH
 Path to a custom HolmesGPT configuration file. If not set, defaults to `~/.holmes/config.yaml`.
 
@@ -188,7 +206,7 @@ Path to a custom HolmesGPT configuration file. If not set, defaults to `~/.holme
 export HOLMES_CONFIG_PATH="/path/to/custom/config.yaml"
 ```
 
-### HOLMES_LOG_LEVEL
+### LOG_LEVEL
 Controls the logging verbosity of HolmesGPT.
 
 **Values:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
@@ -196,7 +214,7 @@ Controls the logging verbosity of HolmesGPT.
 
 **Example:**
 ```bash
-export HOLMES_LOG_LEVEL="DEBUG"
+export LOG_LEVEL="DEBUG"
 ```
 
 ### TRACE_TOKEN_USAGE
