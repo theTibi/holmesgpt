@@ -55,6 +55,8 @@ MODEL_LIST_FILE_LOCATION = os.environ.get(
 OVERRIDE_MAX_OUTPUT_TOKEN = environ_get_safe_int("OVERRIDE_MAX_OUTPUT_TOKEN")
 OVERRIDE_MAX_CONTENT_SIZE = environ_get_safe_int("OVERRIDE_MAX_CONTENT_SIZE")
 
+_warned_missing_model_lookups: set[tuple[str, str]] = set()
+
 
 def get_context_window_compaction_threshold_pct() -> int:
     """Get the compaction threshold percentage at runtime to support test overrides."""
@@ -62,6 +64,21 @@ def get_context_window_compaction_threshold_pct() -> int:
 
 
 ROBUSTA_AI_MODEL_NAME = "Robusta"
+
+
+def _is_gemini_route(litellm_model_name: str) -> bool:
+    """True if the model goes through Google's Gemini GenerateContent API.
+
+    Covers `gemini/<model>` (Google AI Studio) and Vertex-AI Gemini routes.
+    Vertex-AI also hosts non-Gemini models (Claude, Llama, etc.) - those are NOT
+    Gemini and must keep cache_control_injection_points.
+    """
+    if litellm_model_name.startswith("gemini/"):
+        return True
+    if litellm_model_name.startswith(("vertex_ai/", "vertex_ai_beta/")):
+        # Only Vertex-hosted Gemini hits the GenerateContent CachedContent path.
+        return "gemini" in litellm_model_name.split("/", 1)[1].lower()
+    return False
 
 
 class ContextWindowUsage(BaseModel):
@@ -348,6 +365,11 @@ class DefaultLLM(LLM):
                     model_requirements = litellm.validate_environment(
                         model=model, api_key=api_key, api_base=api_base
                     )
+        elif provider == "github_copilot":
+            # GitHub Copilot uses OAuth device flow for authentication, not
+            # traditional API keys.  LiteLLM handles the token lifecycle
+            # internally, so skip the standard key validation.
+            model_requirements = {"keys_in_environment": True, "missing_keys": []}
         elif provider == "azure":
             model_requirements = litellm.validate_environment(
                 model=model, api_key=api_key, api_base=api_base, api_version=api_version
@@ -407,12 +429,15 @@ class DefaultLLM(LLM):
             except Exception:
                 continue
 
-        # Log which lookups we tried
-        logging.warning(
-            f"Couldn't find model {self.model} in litellm's model list (tried: {', '.join(self._get_model_name_variants_for_lookup())}), "
-            f"using default {FALLBACK_CONTEXT_WINDOW_SIZE} tokens for max_input_tokens. "
-            f"To override, set OVERRIDE_MAX_CONTENT_SIZE environment variable to the correct value for your model."
-        )
+        # Log which lookups we tried (once per model to avoid log spam)
+        warn_key = (self.model, "max_input_tokens")
+        if warn_key not in _warned_missing_model_lookups:
+            _warned_missing_model_lookups.add(warn_key)
+            logging.warning(
+                f"Couldn't find model {self.model} in litellm's model list (tried: {', '.join(self._get_model_name_variants_for_lookup())}), "
+                f"using default {FALLBACK_CONTEXT_WINDOW_SIZE} tokens for max_input_tokens. "
+                f"To override, set OVERRIDE_MAX_CONTENT_SIZE environment variable to the correct value for your model."
+            )
         return FALLBACK_CONTEXT_WINDOW_SIZE
 
     def _is_anthropic_model(self) -> bool:
@@ -561,7 +586,15 @@ class DefaultLLM(LLM):
                 allowed_openai_params = []
             allowed_openai_params.extend(existing_allowed)
 
-        self.args.setdefault("temperature", temperature)
+        # Strip a pre-existing `temperature: None` (e.g. from `temperature: null` in
+        # modelList) before applying the caller's value, so setdefault() is not blocked
+        # by a null sentinel and so no `temperature=None` leaks to providers that reject
+        # it (e.g. Bedrock Anthropic Opus 4.7). Preserves PR #698: when args holds a real
+        # temperature, setdefault is a no-op and the persisted value survives.
+        if self.args.get("temperature", ...) is None:
+            self.args.pop("temperature", None)
+        if temperature is not None:
+            self.args.setdefault("temperature", temperature)
 
         # Get the litellm module to use (wrapped or unwrapped)
         litellm_to_use = self.tracer.wrap_llm(litellm) if self.tracer else litellm
@@ -592,6 +625,21 @@ class DefaultLLM(LLM):
             # Leave api_key as None in completion call when AZURE_AD_TOKEN_AUTH is enabled
             self.api_key = None
 
+        # Gemini rejects GenerateContent requests that combine CachedContent with
+        # system_instruction / tools / tool_config, which is exactly what
+        # cache_control_injection_points produces for us. Skip the cache hint for
+        # Gemini routes (both Google AI Studio and Vertex-AI hosted Gemini); other
+        # providers - including non-Gemini models on Vertex like Claude - keep
+        # their cache benefit.
+        cache_kwargs: Dict[str, Any] = {}
+        if not _is_gemini_route(litellm_model_name):
+            cache_kwargs["cache_control_injection_points"] = [
+                {
+                    "location": "message",
+                    "index": -1,  # -1 targets the last message.
+                }
+            ]
+
         result = litellm_to_use.completion(
             model=litellm_model_name,
             api_key=self.api_key,
@@ -606,12 +654,7 @@ class DefaultLLM(LLM):
             **azure_ad_kwargs,
             **tools_args,
             **self.args,
-            cache_control_injection_points=[
-                {
-                    "location": "message",
-                    "index": -1,  # -1 targets the last message.
-                }
-            ],
+            **cache_kwargs,
         )
 
         if isinstance(result, ModelResponse):
@@ -642,12 +685,15 @@ class DefaultLLM(LLM):
             except Exception:
                 continue
 
-        # Log which lookups we tried
-        logging.warning(
-            f"Couldn't find model {self.model} in litellm's model list (tried: {', '.join(self._get_model_name_variants_for_lookup())}), "
-            f"using {max_output_tokens} tokens for max_output_tokens. "
-            f"To override, set OVERRIDE_MAX_OUTPUT_TOKEN environment variable to the correct value for your model."
-        )
+        # Log which lookups we tried (once per model to avoid log spam)
+        warn_key = (self.model, "max_output_tokens")
+        if warn_key not in _warned_missing_model_lookups:
+            _warned_missing_model_lookups.add(warn_key)
+            logging.warning(
+                f"Couldn't find model {self.model} in litellm's model list (tried: {', '.join(self._get_model_name_variants_for_lookup())}), "
+                f"using {max_output_tokens} tokens for max_output_tokens. "
+                f"To override, set OVERRIDE_MAX_OUTPUT_TOKEN environment variable to the correct value for your model."
+            )
         return max_output_tokens
 
 
@@ -666,7 +712,17 @@ class LLMModelRegistry:
         return self._default_robusta_model
 
     def _init_models(self):
-        self._llms = self._parse_models_file(MODEL_LIST_FILE_LOCATION)
+        # Precedence for the model list file:
+        # 1. MODEL_LIST_FILE_LOCATION (env var, or its server default when the
+        #    file exists -- covers Helm deployments mounting /etc/holmes/...)
+        # 2. ~/.holmes/model_list.yaml (CLI default)
+        from holmes.core.config import config_path_dir
+
+        if os.path.exists(MODEL_LIST_FILE_LOCATION):
+            path = MODEL_LIST_FILE_LOCATION
+        else:
+            path = os.path.join(config_path_dir, "model_list.yaml")
+        self._llms = self._parse_models_file(path)
 
         if self._should_load_robusta_ai():
             self.configure_robusta_ai_model()

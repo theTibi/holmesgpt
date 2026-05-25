@@ -178,6 +178,7 @@ class LLMResult(RequestStats):
     instructions: List[str] = Field(default_factory=list)
     messages: Optional[List[dict]] = None
     metadata: Optional[Dict[Any, Any]] = None
+    finish_reason: Optional[str] = None  # Last LLM iteration's finish_reason (stop / length / tool_calls / content_filter)
 
 
 class ToolCallWithDecision(BaseModel):
@@ -203,7 +204,7 @@ class ToolCallingLLM:
         self.llm = llm
         self.tool_results_dir = tool_results_dir
 
-        self._runbook_in_use: bool = False
+        self._skill_in_use: bool = False
 
     def with_executor(self, tool_executor: ToolExecutor) -> "ToolCallingLLM":
         """Return a shallow copy with a different ToolExecutor.
@@ -219,15 +220,15 @@ class ToolCallingLLM:
             tracer=self.tracer,
         )
         # Preserve transient state so resumed turns keep access to
-        # runbook-unlocked (restricted) tools.
-        clone._runbook_in_use = self._runbook_in_use
+        # skill-unlocked (restricted) tools.
+        clone._skill_in_use = self._skill_in_use
         return clone
 
     def reset_interaction_state(self) -> None:
         """
-        For interactive loop, reset runbooks in use
+        For interactive loop, reset skills in use
         """
-        self._runbook_in_use = False
+        self._skill_in_use = False
 
     def _supports_vision(self) -> bool:
         """Check if vision/multimodal input is enabled.
@@ -323,6 +324,26 @@ class ToolCallingLLM:
                         )
 
                 if not tool_result:
+                    if tool_decision.edit_command is not None:
+                        try:
+                            edited_params = json.loads(tool_call.function.arguments or "{}")
+                        except json.JSONDecodeError:
+                            edited_params = {}
+                        edited_params["command"] = tool_decision.edit_command
+                        edited_arguments = json.dumps(edited_params)
+                        tool_call.function.arguments = edited_arguments
+                        # Persist the edited command in the conversation history so
+                        # subsequent turns see the command that was actually executed.
+                        msg_tool_calls = messages[
+                            tool_call_with_decision.message_index
+                        ].get("tool_calls", [])
+                        for original_tool_call in msg_tool_calls:
+                            if original_tool_call.get("id") == tool_call.id:
+                                original_function = original_tool_call.get("function") or {}
+                                original_function["arguments"] = edited_arguments
+                                original_tool_call["function"] = original_function
+                                break
+
                     tool_result = self._invoke_llm_tool_call(
                         tool_to_call=tool_call,
                         previous_tool_calls=[],
@@ -467,7 +488,7 @@ class ToolCallingLLM:
 
     def _should_include_restricted_tools(self) -> bool:
         """Check if restricted tools should be included in the tools list."""
-        return self._runbook_in_use
+        return self._skill_in_use
 
     def _get_tools(self) -> list:
         """Get tools list, filtering restricted tools based on authorization.
@@ -577,6 +598,7 @@ class ToolCallingLLM:
                         num_llm_calls=total_num_llm_calls,
                         messages=terminal_data.get("messages"),
                         metadata=terminal_data.get("metadata"),
+                        finish_reason=(terminal_data.get("metadata") or {}).get("finish_reason"),
                         **accumulated_stats.model_dump(),
                     )
 
@@ -598,6 +620,7 @@ class ToolCallingLLM:
                 num_llm_calls=total_num_llm_calls,
                 messages=terminal_data["messages"],
                 metadata=terminal_data.get("metadata"),
+                finish_reason=(terminal_data.get("metadata") or {}).get("finish_reason"),
                 **accumulated_stats.model_dump(),
             )
 
@@ -699,14 +722,14 @@ class ToolCallingLLM:
                 if toolset_name:
                     self.tool_executor.oauth_connector.store_user_tools(effective_user, toolset_name, tool_response.oauth_tools)
 
-            # Track runbook usage - if fetch_runbook is called successfully,
+            # Track skill usage - if fetch_skill is called successfully,
             # restricted tools become available for the rest of the current request
             if (
-                tool_name == "fetch_runbook"
+                tool_name == "fetch_skill"
                 and tool_response.status == StructuredToolResultStatus.SUCCESS
             ):
-                self._runbook_in_use = True
-                logging.debug("Runbook fetched - restricted tools now available")
+                self._skill_in_use = True
+                logging.debug("Skill fetched - restricted tools now available")
 
         except Exception as e:
             logging.error(
@@ -1154,6 +1177,18 @@ class ToolCallingLLM:
 
             tools_to_call = getattr(response_message, "tool_calls", None)
             if not tools_to_call:
+                # Capture the final iteration's finish_reason for usage tracking
+                # (HolmesUsageEvents.finish_reason). Earlier iterations always end
+                # with 'tool_calls'; this last one tells us why the loop terminated
+                # (stop / length / content_filter / etc.). Skip if the value isn't
+                # a real string (e.g. MagicMock in tests), so pydantic validation
+                # of LLMResult below doesn't blow up.
+                try:
+                    fr = full_response.choices[0].finish_reason  # type: ignore
+                    if isinstance(fr, str):
+                        metadata["finish_reason"] = fr
+                except (AttributeError, IndexError, TypeError):
+                    pass
                 yield StreamMessage(
                     event=StreamEvents.ANSWER_END,
                     data={
@@ -1334,7 +1369,7 @@ class ToolCallingLLM:
                 # Update the tool number offset for the next iteration
                 tool_number_offset += len(tools_to_call)
 
-                # Re-fetch tools if the tool list changed (runbook activation, OAuth tool discovery, etc.)
+                # Re-fetch tools if the tool list changed (skill activation, OAuth tool discovery, etc.)
                 if tools is not None:
                     new_tools = self._get_tools()
                     old_names = {t["function"]["name"] for t in tools}

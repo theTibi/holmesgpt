@@ -56,6 +56,39 @@ export TOOL_SCHEMA_NO_PARAM_OBJECT_IF_NO_PARAMS=true
 
 **Note:** This setting is typically only needed when using Gemini models. Other providers handle empty parameter objects correctly.
 
+## Server Security
+
+### HOLMES_API_KEY
+**Default:** not set (authentication disabled)
+
+When set, all API requests must include this key via either:
+
+- `X-API-Key: <key>` header, or
+- `Authorization: Bearer <key>` header
+
+Health check endpoints (`/healthz`, `/readyz`) are always exempt.
+
+**Generating a key:**
+```bash
+# Generate a random key with 32 bytes of entropy
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Or use openssl
+openssl rand -base64 32
+```
+
+**Example:**
+```bash
+export HOLMES_API_KEY=my-secret-key-here
+```
+
+**Docker example:**
+```bash
+docker run -d \
+  -e HOLMES_API_KEY=your-generated-key \
+  ...
+```
+
 ## SSL/TLS
 
 ### CERTIFICATE
@@ -130,10 +163,31 @@ Absolute maximum tokens for a single tool response, regardless of context window
 export TOOL_MAX_ALLOCATED_CONTEXT_WINDOW_TOKENS=50000
 ```
 
+## Tool Subprocess Memory Limit
+
+### TOOL_MEMORY_LIMIT_MB
+**Default:** `800` on x86_64, `1500` on ARM / aarch64
+
+Per-subprocess virtual-memory cap (in MB) applied to every tool command Holmes runs. Implemented by prefixing each command with `ulimit -v <value × 1024>`. When a command exceeds the cap, the kernel kills it (exit `137`) and Holmes prefixes the output with an `[OOM]` hint instructing the LLM to retry with a narrower query.
+
+The cap limits **virtual address space**, not resident memory — Go binaries like `kubectl` can reserve hundreds of MB at startup, so set this too low and you will break commands that would otherwise use little RAM. On Kubernetes, keep this comfortably below the pod's `resources.limits.memory`. On macOS the cap is silently ignored (BSD kernel does not enforce `ulimit -v`).
+
+See [Tool Execution Safety](../data-sources/tool-execution-safety.md) for the full mechanism, implications, and tuning guidance.
+
+**Example:**
+```bash
+export TOOL_MEMORY_LIMIT_MB=2000
+```
+
 ## HolmesGPT Configuration
 
 ### MODEL_LIST_FILE_LOCATION
 Path to a YAML file that defines named model configurations. When set, you can reference models by name using `--model=<name>` in the CLI or the `model` parameter in the HTTP API, instead of specifying the full model identifier and credentials each time.
+
+If unset, HolmesGPT looks for the model list file in this order:
+
+1. `/etc/holmes/config/model_list.yaml` (server / Helm default)
+2. `~/.holmes/model_list.yaml` (CLI default)
 
 **Example:**
 ```bash
@@ -141,6 +195,24 @@ export MODEL_LIST_FILE_LOCATION="/path/to/model_list.yaml"
 ```
 
 See [Using Multiple Providers](../ai-providers/using-multiple-providers.md) for the model list file format and usage.
+
+### LITELLM_MODEL_COST_MAP_URL
+Overrides the URL LiteLLM fetches the model catalog (`model_prices_and_context_window.json`) from. LiteLLM uses that catalog to know each model's context window, max output tokens, and pricing. By default LiteLLM pulls it from `raw.githubusercontent.com`, which is unreachable from networks that block GitHub egress.
+
+Robusta hosts a mirror of the same file at:
+
+```
+https://api.robusta.dev/litellm/model_prices_and_context_window.json
+```
+
+The mirror is cached and falls back to its last-known-good copy if the upstream is temporarily unreachable, so pointing at it gives the same freshness as the default URL without requiring egress to `raw.githubusercontent.com`.
+
+**Helm example:**
+```yaml
+additionalEnvVars:
+  - name: LITELLM_MODEL_COST_MAP_URL
+    value: https://api.robusta.dev/litellm/model_prices_and_context_window.json
+```
 
 ### HOLMES_CONFIG_PATH
 Path to a custom HolmesGPT configuration file. If not set, defaults to `~/.holmes/config.yaml`.
@@ -150,7 +222,7 @@ Path to a custom HolmesGPT configuration file. If not set, defaults to `~/.holme
 export HOLMES_CONFIG_PATH="/path/to/custom/config.yaml"
 ```
 
-### HOLMES_LOG_LEVEL
+### LOG_LEVEL
 Controls the logging verbosity of HolmesGPT.
 
 **Values:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
@@ -158,7 +230,7 @@ Controls the logging verbosity of HolmesGPT.
 
 **Example:**
 ```bash
-export HOLMES_LOG_LEVEL="DEBUG"
+export LOG_LEVEL="DEBUG"
 ```
 
 ### TRACE_TOKEN_USAGE

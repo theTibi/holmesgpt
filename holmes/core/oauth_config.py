@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, Field, model_validator
+from holmes.utils.header_rendering import render_env_template
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ class OAuthEndpoints:
     authorization_url: Optional[str] = None
     token_url: Optional[str] = None
     client_id: Optional[str] = None
+    client_secret: Optional[str] = None
     scopes: Optional[List[str]] = None
     registration_endpoint: Optional[str] = None
 
@@ -134,6 +136,7 @@ class MCPOAuthConfig(BaseModel):
     authorization_url: Optional[str] = Field(default=None, description="IdP authorization endpoint URL. Auto-discovered if omitted.")
     token_url: Optional[str] = Field(default=None, description="IdP token endpoint URL. Auto-discovered if omitted.")
     client_id: Optional[str] = Field(default=None, description="OAuth public client ID. Auto-registered via DCR if omitted.")
+    client_secret: Optional[str] = Field(default=None, description="OAuth client secret for confidential clients.")
     scopes: Optional[List[str]] = Field(default=None, description="OAuth scopes to request.")
     registration_endpoint: Optional[str] = Field(default=None, description="DCR endpoint (auto-populated during discovery, sent to frontend for client registration).")
 
@@ -142,6 +145,19 @@ class MCPOAuthConfig(BaseModel):
         """Auto-enable OAuth when any endpoint or client_id is explicitly set."""
         if not self.enabled and (self.authorization_url or self.token_url or self.client_id):
             self.enabled = True
+        return self
+
+    @model_validator(mode="after")
+    def render_client_secret_env_template(self):
+        """Substitute ``{{ env.X }}`` references in ``client_secret`` at load time.
+
+        Keeps the secret out of YAML by reading it from an environment variable
+        (typically injected from a Kubernetes Secret) — same Jinja syntax the
+        headers code path already supports.
+        """
+   
+
+        self.client_secret = render_env_template(self.client_secret, "MCPOAuthConfig.client_secret")
         return self
 
 
@@ -240,6 +256,10 @@ class OAuthExchangeManager:
             pending.oauth_config.client_id = client_id
             logger.info("OAuth: using client_id from frontend DCR: %s", client_id)
 
+        # Use client_secret from frontend (DCR) if available, otherwise fall back
+        # to the server-side config (for pre-registered confidential clients like Azure AD).
+        client_secret = oauth_code.client_secret or pending.oauth_config.client_secret
+
         try:
             token_data = exchange_code_for_tokens(
                 token_url=pending.oauth_config.token_url,
@@ -247,7 +267,7 @@ class OAuthExchangeManager:
                 redirect_uri=oauth_code.redirect_uri,
                 client_id=client_id,
                 code_verifier=pending.code_verifier,
-                client_secret=oauth_code.client_secret,
+                client_secret=client_secret,
             )
         except (OAuthTokenExchangeError, KeyError, Exception):
             logger.exception("OAuth exchange failed (tool_call_id=%s, token_url=%s)", tool_call_id, pending.oauth_config.token_url)

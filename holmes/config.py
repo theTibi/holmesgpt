@@ -24,9 +24,9 @@ from holmes.core.tools import PrerequisiteCacheMode, Toolset, ToolsetTag
 from holmes.core.tools_utils.tool_executor import ToolExecutor
 from holmes.core.toolset_manager import ToolsetManager
 from holmes.core.transformers.llm_summarize import LLMSummarizeTransformer
-from holmes.plugins.runbooks import (
-    RunbookCatalog,
-    load_runbook_catalog,
+from holmes.plugins.skills.skill_loader import (
+    SkillCatalog,
+    load_skill_catalog,
 )
 
 # Source plugin imports moved to their respective create methods to speed up startup
@@ -48,6 +48,13 @@ from holmes.utils.pydantic_utils import RobustaBaseConfig, load_model_from_file
 
 
 DEFAULT_CONFIG_LOCATION = os.path.join(config_path_dir, "config.yaml")
+
+
+def _parse_custom_skill_paths_env() -> List[str]:
+    raw = os.environ.get("CUSTOM_SKILL_PATHS")
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 class SupportedTicketSources(str, Enum):
@@ -96,7 +103,7 @@ class Config(RobustaBaseConfig):
     opsgenie_team_integration_key: Optional[SecretStr] = None
     opsgenie_query: Optional[str] = None
 
-    custom_runbook_catalogs: List[Union[str, FilePath]] = []
+    custom_skill_paths: List[Union[str, FilePath]] = []
 
     # custom_toolsets is passed from config file, and be used to override built-in toolsets, provides 'stable' customized toolset.
     # The status of custom toolsets can be cached.
@@ -147,7 +154,7 @@ class Config(RobustaBaseConfig):
                 mcp_servers=self.mcp_servers,
                 custom_toolsets=self.custom_toolsets,
                 custom_toolsets_from_cli=self.custom_toolsets_from_cli,
-                custom_runbook_catalogs=self.custom_runbook_catalogs,
+                custom_skill_paths=self.custom_skill_paths,
                 config_file_path=self._config_file_path,
                 additional_toolsets=self.additional_toolsets,
             )
@@ -219,6 +226,11 @@ class Config(RobustaBaseConfig):
                 result.model = model_from_env
                 result._model_source = "via $MODEL"
 
+        if not result.custom_skill_paths:
+            skill_paths = _parse_custom_skill_paths_env()
+            if skill_paths:
+                result.custom_skill_paths = skill_paths
+
         result.log_useful_info()
         return result
 
@@ -250,6 +262,9 @@ class Config(RobustaBaseConfig):
             val = os.getenv(field_name.upper(), None)
             if val is not None:
                 kwargs[field_name] = val
+        skill_paths = _parse_custom_skill_paths_env()
+        if skill_paths:
+            kwargs["custom_skill_paths"] = skill_paths
         kwargs["cluster_name"] = Config.__get_cluster_name()
         kwargs["should_try_robusta_ai"] = True
         result = cls(**kwargs)
@@ -281,11 +296,10 @@ class Config(RobustaBaseConfig):
             return env_cluster_name
         return Config.get_robusta_global_config_value("cluster_name")
 
-    def get_runbook_catalog(self) -> Optional[RunbookCatalog]:
-        runbook_catalog = load_runbook_catalog(
-            dal=self.dal, custom_catalog_paths=self.custom_runbook_catalogs
+    def get_skill_catalog(self) -> Optional[SkillCatalog]:
+        return load_skill_catalog(
+            dal=self.dal, custom_skill_paths=self.custom_skill_paths,
         )
-        return runbook_catalog
 
     # ── Unified factory methods ──
 
@@ -611,6 +625,7 @@ class Config(RobustaBaseConfig):
         return AlertManagerSource(
             url=self.alertmanager_url,  # type: ignore
             username=self.alertmanager_username,
+            password=self.alertmanager_password,
             alertname_filter=self.alertmanager_alertname,  # type: ignore
             label_filter=self.alertmanager_label,  # type: ignore
             filepath=self.alertmanager_file,
