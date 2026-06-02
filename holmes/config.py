@@ -43,7 +43,11 @@ from holmes.core.config import config_path_dir
 from holmes.core.oauth_utils import eager_load_oauth_tools, preload_oauth_tokens, set_oauth_dal
 from holmes.core.supabase_dal import SupabaseDal
 from holmes.utils.definitions import RobustaConfig
-from holmes.utils.pydantic_utils import RobustaBaseConfig, load_model_from_file
+from holmes.utils.pydantic_utils import (
+    RobustaBaseConfig,
+    load_model_from_file,
+    parse_model_from_file,
+)
 
 
 
@@ -509,7 +513,7 @@ class Config(RobustaBaseConfig):
         """
         fresh = None
         if self._config_file_path and Path(self._config_file_path).exists():
-            fresh = load_model_from_file(Config, Path(self._config_file_path))
+            fresh = parse_model_from_file(Config, Path(self._config_file_path))
 
         with self._executor_lock:
             if fresh is not None:
@@ -539,7 +543,7 @@ class Config(RobustaBaseConfig):
         """
         fresh = None
         if self._config_file_path and Path(self._config_file_path).exists():
-            fresh = load_model_from_file(Config, Path(self._config_file_path))
+            fresh = parse_model_from_file(Config, Path(self._config_file_path))
 
         with self._executor_lock:
             if fresh is not None:

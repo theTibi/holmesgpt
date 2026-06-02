@@ -4,6 +4,7 @@ import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from holmes.admin.admin_api import init_admin_app
 from holmes.config import Config
@@ -115,6 +116,13 @@ class TestReloadToolsets:
         assert result["reloaded"] is True
         assert config._toolset_manager is None
 
+    def test_invalid_yaml_raises_validation_error(self, config, config_yaml_path):
+        """Unknown config keys raise ValidationError instead of calling sys.exit()."""
+        config_yaml_path.write_text(yaml.dump({"toolset": {"foo": {"enabled": True}}}))
+
+        with pytest.raises(ValidationError):
+            config.reload_toolsets()
+
 
 class TestReloadModels:
     """Unit tests for Config.reload_models()."""
@@ -145,6 +153,13 @@ class TestReloadModels:
 
             result = config.reload_models()
             assert result["models_loaded"] == 2
+
+    def test_invalid_yaml_raises_validation_error(self, config, config_yaml_path):
+        """Unknown config keys raise ValidationError instead of calling sys.exit()."""
+        config_yaml_path.write_text(yaml.dump({"unknown_field": True}))
+
+        with pytest.raises(ValidationError):
+            config.reload_models()
 
 
 class TestAdminEndpoints:
@@ -235,3 +250,17 @@ class TestAdminEndpoints:
         response = client.post("/api/admin/reload/toolsets")
         assert response.status_code == 500
         assert "config file missing" in response.json()["detail"]
+
+    @patch("holmes.config.Config.get_skill_catalog", return_value=None)
+    @patch("holmes.config.Config.create_tool_executor")
+    def test_reload_toolsets_validation_error_returns_500_json(
+        self, mock_create, _mock_catalog, config, config_yaml_path, client
+    ):
+        """Invalid mounted YAML returns structured 500 detail, not a generic ASGI 500."""
+        config_yaml_path.write_text(yaml.dump({"toolset": {"foo": {"enabled": True}}}))
+        mock_create.return_value = MagicMock(toolsets=[], enabled_toolsets=[])
+
+        response = client.post("/api/admin/reload/toolsets")
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert "toolset" in detail.lower() or "extra" in detail.lower()
