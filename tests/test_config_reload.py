@@ -123,6 +123,18 @@ class TestReloadToolsets:
         with pytest.raises(ValidationError):
             config.reload_toolsets()
 
+    def test_reload_preserves_custom_skill_paths_from_env(
+        self, config_yaml_path, monkeypatch
+    ):
+        """Reload re-applies CUSTOM_SKILL_PATHS when YAML omits custom_skill_paths."""
+        monkeypatch.setenv("CUSTOM_SKILL_PATHS", "/etc/holmes/skills")
+        config = Config.load_from_file(config_yaml_path)
+        assert config.custom_skill_paths == ["/etc/holmes/skills"]
+
+        config.reload_toolsets()
+
+        assert config.custom_skill_paths == ["/etc/holmes/skills"]
+
 
 class TestReloadModels:
     """Unit tests for Config.reload_models()."""
@@ -160,6 +172,47 @@ class TestReloadModels:
 
         with pytest.raises(ValidationError):
             config.reload_models()
+
+    def test_reload_preserves_model_from_env(self, config_yaml_path, monkeypatch):
+        """Reload re-applies MODEL when the mounted YAML has no model key."""
+        monkeypatch.setenv("MODEL", "anthropic/claude-sonnet-4-5")
+        config = Config.load_from_file(config_yaml_path)
+        assert config.model == "anthropic/claude-sonnet-4-5"
+        assert config._model_source == "via $MODEL"
+
+        with patch("holmes.config.LLMModelRegistry") as MockRegistry:
+            mock_instance = MagicMock()
+            mock_instance.models = {}
+            MockRegistry.return_value = mock_instance
+            config.reload_models()
+
+        assert config.model == "anthropic/claude-sonnet-4-5"
+        assert config._model_source == "via $MODEL"
+
+    def test_reload_keeps_yaml_model_over_env(self, config_yaml_path, monkeypatch):
+        """Explicit model in YAML is not replaced by MODEL env on reload."""
+        monkeypatch.setenv("MODEL", "from-env")
+        config_yaml_path.write_text(
+            yaml.dump(
+                {
+                    "model": "from-yaml",
+                    "toolsets": {
+                        "prometheus/metrics": {
+                            "enabled": True,
+                            "config": {"prometheus_url": "http://localhost:9090"},
+                        }
+                    },
+                }
+            )
+        )
+        config = Config.load_from_file(config_yaml_path)
+        assert config.model == "from-yaml"
+
+        with patch("holmes.config.LLMModelRegistry") as MockRegistry:
+            MockRegistry.return_value = MagicMock(models={})
+            config.reload_models()
+
+        assert config.model == "from-yaml"
 
 
 class TestAdminEndpoints:

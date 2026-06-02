@@ -250,19 +250,23 @@ class Config(RobustaBaseConfig):
             result._model_source = f"in {config_file}"
         # Fall through to env var check below
 
-        if result.model is None:
-            model_from_env = os.environ.get("MODEL")
-            if model_from_env and model_from_env.strip():
-                result.model = model_from_env
-                result._model_source = "via $MODEL"
-
-        if not result.custom_skill_paths:
-            skill_paths = _parse_custom_skill_paths_env()
-            if skill_paths:
-                result.custom_skill_paths = skill_paths
+        result._apply_env_fallbacks()
 
         result.log_useful_info()
         return result
+
+    def _apply_env_fallbacks(self) -> None:
+        """Apply MODEL and CUSTOM_SKILL_PATHS when absent after YAML load/reload."""
+        if self.model is None:
+            model_from_env = os.environ.get("MODEL")
+            if model_from_env and model_from_env.strip():
+                self.model = model_from_env
+                self._model_source = "via $MODEL"
+
+        if not self.custom_skill_paths:
+            skill_paths = _parse_custom_skill_paths_env()
+            if skill_paths:
+                self.custom_skill_paths = skill_paths
 
     @classmethod
     def load_from_env(cls):
@@ -522,6 +526,7 @@ class Config(RobustaBaseConfig):
                 self.custom_toolsets = fresh.custom_toolsets
                 self.custom_skill_paths = fresh.custom_skill_paths
                 self.additional_toolsets = fresh.additional_toolsets
+                self._apply_env_fallbacks()
             self._toolset_manager = None
             self._cached_tool_executor = None
             self._cached_executor_key = None
@@ -552,6 +557,7 @@ class Config(RobustaBaseConfig):
                 self.api_base = fresh.api_base
                 self.api_version = fresh.api_version
                 self.fast_model = fresh.fast_model
+                self._apply_env_fallbacks()
             self._llm_model_registry = None
         registry = self.llm_model_registry
         model_count = len(registry.models) if registry.models else 0
