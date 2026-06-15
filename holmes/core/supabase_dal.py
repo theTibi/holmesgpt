@@ -24,6 +24,7 @@ from supabase.lib.client_options import SyncClientOptions as ClientOptions
 from tenacity import (
     retry,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -110,6 +111,12 @@ class RunStatus(str, Enum):
     FAILED = "failed"
     FAILED_NO_RETRY = "failed_no_retry"
     COMPLETED = "completed"
+
+
+class _RemoteToolResultRejected(Exception):
+    """The post_remote_tool_call_result RPC rejected the write because the row
+    was reassigned, stopped, or already finished (first result wins). Terminal —
+    excluded from tenacity retry, since retrying cannot help."""
 
 
 class RobustaToken(BaseModel):
@@ -1099,6 +1106,98 @@ class SupabaseDal:
             )
             return []
 
+    def claim_tool_calls(self, holmes_id: str) -> List[Dict]:
+        """
+        Atomically claim all pending remote tool calls targeting this cluster.
+        Returns claimed RemoteToolCalls rows (status='queued', assignee=holmes_id).
+        Stale pending rows (>5 minutes) are swept to 'timeout' server-side.
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            res = self.client.rpc(
+                "claim_tool_calls",
+                {
+                    "_account_id": self.account_id,
+                    "_cluster_id": self.cluster,
+                    "_assignee": holmes_id,
+                },
+            ).execute()
+            if not res.data:
+                return []
+            if isinstance(res.data, list):
+                return res.data
+            return [res.data]
+        except Exception:
+            logging.exception("Supabase error while claiming tool calls", exc_info=True)
+            return []
+
+    def post_remote_tool_call_result(
+        self,
+        tool_call_id: str,
+        assignee: str,
+        status: str,
+        tool_response: Dict,
+    ) -> bool:
+        """
+        Publish a remote tool call result: tool_response + terminal status
+        ('completed'/'failed') in one atomic, assignee-guarded UPDATE.
+        Returns False when the row was reassigned/stopped (stale worker) —
+        callers must log and drop, never retry.
+        """
+        if not self.enabled:
+            return False
+
+        # The RPC raises 'MISMATCH ...' / 'not found' when a stale or duplicate
+        # worker posts after the row was reassigned, stopped, or already
+        # finished (first result wins). That's terminal — surface it as the
+        # _RemoteToolResultRejected sentinel so tenacity does NOT retry it.
+
+        # Retry a few times on transient infrastructure errors (DNS/cache
+        # overflows in the Supabase proxy, 5xx gateway errors, etc.) so a
+        # transient hiccup doesn't drop a finished tool result. Mismatch /
+        # not-found are excluded from retry (see above).
+        @retry(
+            retry=retry_if_not_exception_type(_RemoteToolResultRejected),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
+            reraise=True,
+        )
+        def _post() -> bool:
+            try:
+                res = self.client.rpc(
+                    "post_remote_tool_call_result",
+                    {
+                        "_id": tool_call_id,
+                        "_account_id": self.account_id,
+                        "_assignee": assignee,
+                        "_status": status,
+                        "_tool_response": tool_response,
+                    },
+                ).execute()
+                return bool(res.data)
+            except Exception as e:
+                msg = str(e).lower()
+                if "mismatch" in msg or "not found" in msg:
+                    raise _RemoteToolResultRejected(str(e)) from e
+                raise
+
+        try:
+            return _post()
+        except _RemoteToolResultRejected as e:
+            # Stale/duplicate worker: log calmly and drop (first result wins).
+            logging.info(
+                "Remote tool call result rejected (stale/duplicate worker): %s", e
+            )
+            return False
+        except Exception:
+            logging.exception(
+                "Supabase error while posting remote tool call result (after retries)",
+                exc_info=True,
+            )
+            return False
+
     def post_conversation_events(
         self,
         conversation_id: str,
@@ -1160,7 +1259,10 @@ class SupabaseDal:
         """
         # Lazy imports avoid a circular import: conversations_worker pulls in
         # conversations.py → config → llm → supabase_dal at module load time.
-        from holmes.core.conversations_worker.models import ConversationStatus
+        from holmes.core.conversations_worker.models import (
+            ConversationReassignedError,
+            ConversationStatus,
+        )
 
         if not self.enabled:
             return False
@@ -1171,30 +1273,47 @@ class SupabaseDal:
             )
             return False
 
-        try:
-            res = self.client.rpc(
-                "update_conversation_status",
-                {
-                    "_account_id": self.account_id,
-                    "_conversation_id": conversation_id,
-                    "_request_sequence": request_sequence,
-                    "_assignee": assignee,
-                    "_status": status,
-                },
-            ).execute()
-            return bool(res.data)
-        except Exception as e:
-            # The RPC raises MISMATCH errors when assignee, request_sequence,
-            # or status guards fail — propagate these so the worker can exit
-            # cleanly rather than retrying a stale transition.
-            if "mismatch" in str(e).lower():
-                from holmes.core.conversations_worker.models import (
-                    ConversationReassignedError,
-                )
+        # Retry a few times on transient infrastructure errors (DNS/cache
+        # overflows in the Supabase proxy, 5xx gateway errors, etc.).  Without
+        # this a transient hiccup leaves the conversation stuck in a non-terminal
+        # state (e.g. "Failed to mark conversation ... complete").  Mismatch
+        # errors are NOT retried — they mean the row was reassigned and the
+        # worker should exit cleanly rather than hammer a stale transition.
+        @retry(
+            retry=retry_if_not_exception_type(ConversationReassignedError),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
+            reraise=True,
+        )
+        def _update() -> bool:
+            try:
+                res = self.client.rpc(
+                    "update_conversation_status",
+                    {
+                        "_account_id": self.account_id,
+                        "_conversation_id": conversation_id,
+                        "_request_sequence": request_sequence,
+                        "_assignee": assignee,
+                        "_status": status,
+                    },
+                ).execute()
+                return bool(res.data)
+            except Exception as e:
+                # The RPC raises MISMATCH errors when assignee, request_sequence,
+                # or status guards fail — propagate these so the worker can exit
+                # cleanly rather than retrying a stale transition.
+                if "mismatch" in str(e).lower():
+                    raise ConversationReassignedError(str(e)) from e
+                raise
 
-                raise ConversationReassignedError(str(e)) from e
+        try:
+            return _update()
+        except ConversationReassignedError:
+            raise
+        except Exception:
             logging.exception(
-                "Supabase error while updating conversation status", exc_info=True
+                "Supabase error while updating conversation status (after retries)",
+                exc_info=True,
             )
             return False
 
