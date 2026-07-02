@@ -790,18 +790,29 @@ def build_ssl_kwargs() -> dict:
         raise SystemExit(
             "TLS misconfigured: set BOTH HOLMES_SSL_CERTFILE and HOLMES_SSL_KEYFILE (or neither)."
         )
-    for label, path in (("HOLMES_SSL_CERTFILE", cert), ("HOLMES_SSL_KEYFILE", key)):
-        if not Path(path).is_file():
-            raise SystemExit(f"TLS misconfigured: {label}={path!r} not found or unreadable.")
+
+    def _require_readable(label: str, path: str) -> None:
+        # is_file() alone only proves the path exists; an unreadable file (e.g.
+        # wrong permissions on a mounted secret) would pass that check and then
+        # fail later inside uvicorn.run, after the slow pre-start sync we're
+        # trying to run behind this fail-fast. Opening it now catches both cases
+        # (FileNotFoundError, IsADirectoryError and PermissionError are all OSError).
+        try:
+            with Path(path).open("rb"):
+                pass
+        except OSError:
+            raise SystemExit(
+                f"TLS misconfigured: {label}={path!r} not found or unreadable."
+            ) from None
+
+    _require_readable("HOLMES_SSL_CERTFILE", cert)
+    _require_readable("HOLMES_SSL_KEYFILE", key)
 
     kwargs: dict = {"ssl_certfile": cert, "ssl_keyfile": key}
     if HOLMES_SSL_KEYFILE_PASSWORD:
         kwargs["ssl_keyfile_password"] = HOLMES_SSL_KEYFILE_PASSWORD
     if HOLMES_SSL_CA_CERTS:  # mTLS: require & verify client certificates
-        if not Path(HOLMES_SSL_CA_CERTS).is_file():
-            raise SystemExit(
-                f"TLS misconfigured: HOLMES_SSL_CA_CERTS={HOLMES_SSL_CA_CERTS!r} not found or unreadable."
-            )
+        _require_readable("HOLMES_SSL_CA_CERTS", HOLMES_SSL_CA_CERTS)
         kwargs["ssl_ca_certs"] = HOLMES_SSL_CA_CERTS
         kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
     return kwargs

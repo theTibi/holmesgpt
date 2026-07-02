@@ -165,7 +165,7 @@ For complete API documentation, see the [HTTP API Reference](../reference/http-a
 
 By default the pod serves the API over plain HTTP. HolmesGPT can serve **HTTPS directly from the pod** (in-app TLS) — no ingress, gateway, or sidecar proxy is required. This is disabled by default and is fully backward compatible: existing installs are unchanged until you enable it.
 
-When enabled, the chart mounts your TLS secret into the pod, points the server at it via the `HOLMES_SSL_*` environment variables, switches the liveness/readiness probes and the Service `appProtocol` to HTTPS automatically.
+When enabled, the chart mounts your TLS secret into the pod, points the server at it via the `HOLMES_SSL_*` environment variables, and switches the Service `appProtocol` to HTTPS automatically. The liveness/readiness probes also switch to HTTPS — except when `caCertsSecretKey` is set for mTLS, in which case the chart falls back to `tcpSocket` probes because the kubelet cannot present a client certificate.
 
 **Provide your own certificate.** The chart does not generate a self-signed certificate — supply a Kubernetes TLS secret containing `tls.crt` and `tls.key`. You can create it with [cert-manager](https://cert-manager.io/) or manually:
 
@@ -195,7 +195,7 @@ After enabling, port-forward and call the service over `https` (use `-k` for a s
 ```bash
 kubectl port-forward svc/holmesgpt-holmes 8080:80
 curl -k https://localhost:8080/api/chat -H "Content-Type: application/json" \
-  -d '{"ask": "list pods in namespace default?", "model": "gpt-4.1"}'
+  -d '{"ask": "list pods in namespace default?", "model": "anthropic/claude-sonnet-4-5-20250929"}'
 ```
 
 ## Upgrading

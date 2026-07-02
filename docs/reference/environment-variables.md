@@ -151,7 +151,7 @@ Base64-encoded custom CA certificate for outbound HTTPS requests. When set, the 
 
 ### API Server HTTPS (`HOLMES_SSL_*`)
 
-Serve the HolmesGPT API over **HTTPS directly from the application** (in-app TLS — no reverse proxy or ingress required). When both `HOLMES_SSL_CERTFILE` and `HOLMES_SSL_KEYFILE` are set, the server listens with TLS; otherwise it serves plain HTTP. If only one of the two is set, or a referenced file is missing, the server **fails to start** rather than silently falling back to HTTP.
+Serve the HolmesGPT API over **HTTPS directly from the application** (in-app TLS — no reverse proxy or ingress required). When both `HOLMES_SSL_CERTFILE` and `HOLMES_SSL_KEYFILE` are set, the server listens with TLS; otherwise it serves plain HTTP. If only one of the two is set, if a referenced file is missing, or if `HOLMES_SSL_CA_CERTS` / `HOLMES_SSL_KEYFILE_PASSWORD` is set without both server-side files, the server **fails to start** rather than silently falling back to HTTP.
 
 | Variable | Required | Description |
 | --- | --- | --- |

@@ -6,6 +6,7 @@ environment. The helper only checks that the cert/key/CA paths exist (it does no
 parse them), so dummy files under tmp_path are sufficient.
 """
 
+import os
 import ssl
 
 import pytest
@@ -52,6 +53,20 @@ def test_only_keyfile_fails_fast(monkeypatch, cert_and_key):
 def test_missing_cert_file_fails_fast(monkeypatch, tmp_path, cert_and_key):
     _, key = cert_and_key
     monkeypatch.setattr(server, "HOLMES_SSL_CERTFILE", str(tmp_path / "nope.crt"))
+    monkeypatch.setattr(server, "HOLMES_SSL_KEYFILE", key)
+    with pytest.raises(SystemExit):
+        server.build_ssl_kwargs()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root bypasses file permissions, so chmod 000 stays readable"
+)
+def test_unreadable_cert_file_fails_fast(monkeypatch, cert_and_key):
+    # A file that exists but isn't readable (e.g. wrong permissions on a mounted
+    # secret) must fail fast here, not later inside uvicorn.run.
+    cert, key = cert_and_key
+    os.chmod(cert, 0o000)
+    monkeypatch.setattr(server, "HOLMES_SSL_CERTFILE", cert)
     monkeypatch.setattr(server, "HOLMES_SSL_KEYFILE", key)
     with pytest.raises(SystemExit):
         server.build_ssl_kwargs()
